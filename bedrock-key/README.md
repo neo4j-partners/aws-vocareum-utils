@@ -1,8 +1,28 @@
 # Bedrock API key operations
 
-This directory creates and operates the shared Bedrock bearer key used by the
-workshop. One `uv` command covers key creation, status, spend, stop and resume,
-breaker rehearsals, logs, and teardown:
+## Why this key exists
+
+The workshop normally calls Bedrock from each student's own Vocareum lab
+account. The shared Bedrock key is the backup path. It lives in the instructor
+account, and every student can use the same bearer key from the notebook.
+
+Use it in two cases:
+
+- **No Bedrock access in the lab:** A Vocareum account sometimes cannot reach
+  the models the workshop needs. The key gives students a working model
+  endpoint without waiting on a fix inside the lab account.
+- **Extra capacity:** A large class can hit the lab accounts' model quotas. The
+  key moves traffic to the instructor account, which can carry more load.
+
+Because one key serves the whole class, a runaway notebook can spend real
+money fast. The spend controls in this directory watch the cost and turn the
+key off when it crosses a threshold.
+
+## Tooling
+
+This directory creates and operates that key. One `uv` command covers key
+creation, status, spend, stop and resume, breaker rehearsals, logs, and
+teardown:
 
 ```bash
 uv run bedrock-key/admin.py --help

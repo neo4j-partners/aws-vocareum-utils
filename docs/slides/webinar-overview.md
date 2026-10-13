@@ -55,7 +55,6 @@ Speaker: Ryan Knight. Co-presented with Vocareum.
   - `lab_setup.sh` pre-warms each student's cluster.
   - `user_setup.sh` makes sure the cluster is ready and imports the notebooks.
   - `lab_end.sh` reclaims anything billable when the session ends.
-- **The same pattern, its own tooling:** The [dbx-vocareum](https://github.com/neo4j-partners/dbx-vocareum) repository brings the same lifecycle tools to Databricks. Its ship gate checks the catalogs, tables, warehouse, and pipeline a finished lab should hold.
 - **Where it lives:** The course lives in the public [databricks-neo4j-workshop](https://github.com/neo4j-partners/databricks-neo4j-workshop) repository.
 - **TODO:** Add the target date.
 
@@ -167,53 +166,7 @@ aws-vocareum-utils/                     tooling repository
 
 Creating the course, assignment, and part is still done in the Vocareum web UI.
 
-## Slide 15: The same tools for Databricks: dbx-vocareum
-
-[dbx-vocareum](https://github.com/neo4j-partners/dbx-vocareum) is the Databricks counterpart to this repository. Its tools are ported from this one, and they follow the same rules.
-
-| Step | AWS: `aws-vocareum-utils` | Databricks: `dbx-vocareum` |
-| --- | --- | --- |
-| Scaffold a course | `vocareum-course-setup NAME --write-local` | `dbx-vocareum-init lab/` |
-| Publish | `vocareum-release --course NAME --publish` | `dbx-vocareum-upload lab/` |
-| Prove the lab came up | `vocareum-expect --no-start --course NAME` | `dbx-vocareum-diagnose --expect expected.json` |
-| Explain a failure | `vocareum-diagnose` | `dbx-vocareum-diagnose` |
-| Measure permissions | `vocareum-probe` | `dbx-vocareum-probe --all` |
-| End sessions | `vocareum-end-all` | `dbx-vocareum-session --end --yes` |
-| Clean up | `vocareum-sweep --delete --course NAME` | `dbx-vocareum-orphans --delete` |
-| Pre-warm compute | None needed | `dbx-vocareum-pool --create --min-idle 5` |
-
-Every command runs with `uv run`.
-
-- **The same rules:** Each tool only reads unless you pass an explicit flag. Every upload is downloaded back and compared by hash. An exit code of `3` means the stored file differs from the one sent.
-- **A different student model:** On Databricks, each student gets a user and a group inside a shared workspace, not an account of their own. There is no CloudFormation step.
-- **Four hooks instead of a template:** Vocareum runs four shell scripts from `/voc/scripts`. `user_setup.sh` is the only required one. It creates the student's compute, imports the notebooks, and sets the page the student lands on.
-- **No publish step:** The next Start Lab uses whatever was uploaded. Vocareum caches nothing.
-- **Compute is the slow part:** A student waits about 16 minutes for a cluster. An instance pool keeps machines booted on standby and cuts about 10 of those minutes.
-- **The course depends on the tooling:** The Databricks course pulls `dbx-vocareum` in as a git dev dependency. The AWS course is the reverse: it depends on nothing, and the tooling reads it.
-
-## Slide 16: Why Databricks labs are different, and what they need
-
-| | AWS lab | Databricks lab |
-| --- | --- | --- |
-| Isolation | One AWS account per student | One user and one group per student, inside a shared workspace |
-| Setup | `lab.template`, a declarative CloudFormation template | Four shell scripts that run step by step |
-| Failure record | Stack events that name each failed resource | An exit code and captured output in the console Session log |
-| Rollback | CloudFormation rolls the stack back | None. A script that fails halfway leaves half a lab |
-| Student credentials | The session hands back temporary AWS keys | The session hands back none. A token must be made inside a live session |
-| Denied access | `AccessDenied`, with the action in the message | The object looks missing. "Not found" can mean "not allowed" |
-| Workspace | Vocareum assigns an account from a pool | Vocareum creates a workspace per part. The Databricks account tier caps how many can be active |
-
-What a Databricks lab needs:
-
-- **Account admin for Vocareum:** Vocareum's service principal holds the Databricks Account admin role. It uses that role to create workspaces and assign users.
-- **Hooks that report their own failures:** A failing script must exit non-zero and write an `error_code` and a `message`. Otherwise the lab fails with no stated reason.
-- **Shared work once, student work per student:** `workspace_init.sh` gets no user or group, so it builds only what every student shares. Per-student compute and notebooks go in `user_setup.sh`.
-- **Idempotent setup:** `workspace_init.sh` runs once per workspace, and one course can have several workspaces. Every step must be safe to run again.
-- **Careful cleanup:** `lab_end.sh` must read the end-lab behavior. On `stop`, it keeps the student's work and removes only billable compute. On `terminate`, it can remove everything.
-- **The right workspace:** The tools must point at the workspace Vocareum created, not one built by hand. Results from any other workspace describe a lab no student enters.
-- **A path to Neo4j:** Vocareum opened port 7687 so clusters can reach Neo4j Aura over Bolt. Neo4j runs in Aura, not inside the workspace.
-
-## Slide 17: Two principals in every student account
+## Slide 15: Two principals in every student account
 
 ```
 ┌──────────────────────── Student AWS account, one per student ─────────────────────────┐
@@ -235,32 +188,25 @@ What a Databricks lab needs:
 - **A result for one is not a result for the other:** An action that works for the deployer can still fail in a notebook. The tools measure each role on its own, and the permission tracker keeps them in separate tables.
 - **Some limits come from above:** An organization policy can deny an action to both roles. No grant in the template can fix that.
 
-## Slide 18: Troubleshooting courses and validating permissions
-
-Why it matters:
+## Slide 16: Why cloud labs are hard to troubleshoot
 
 - **A failed lab hides its cause:** When the setup template fails, the student sees only that the lab did not start. The reason sits in a CloudFormation event the student cannot read.
 - **Two kinds of deny look the same:** An organization policy deny and a missing grant both arrive as `AccessDenied`. Only one of them can be fixed in the course.
 - **The account keeps moving:** Vocareum rotates a pool of accounts. A check against the old account reports on the wrong lab.
-- **Two principals have different rights:** The role that runs `lab.template` is not the role that runs the notebooks. A result for one says nothing about the other.
 
-The core capabilities:
+The two principals from the previous slide add a fourth problem. A result for one role says nothing about the other.
 
-- **Diagnose:** `vocareum-diagnose` recovers why a stack failed.
-- **Probe:** `vocareum-probe` measures one IAM action and returns a verdict.
+## Slide 17: Tools for troubleshooting and probing
+
+- **Diagnose:** `vocareum-diagnose` recovers why a stack failed, without console access.
+- **Probe:** `vocareum-probe --probe bedrock:ListFoundationModels` names an IAM action and returns a verdict. It tells the two kinds of deny apart. An organization-level deny cannot be lifted inside the account. An ordinary IAM shortfall can be fixed in `lab.template`. AWS reports both as `AccessDenied`, so the tool reads the message body.
 - **Gate:** `vocareum-expect` checks that a lab holds what it should.
 - **Refresh:** `vocareum-refresh` repairs the account and stack pins after a rotation.
 - **Sweep:** `vocareum-sweep` finds and deletes this workshop's leftovers.
-
-## Slide 19: Inspecting and probing the account
-
-- **Probe one action:** `vocareum-probe --probe bedrock:ListFoundationModels` names an IAM action and returns a verdict.
-- **Tell two kinds of deny apart:** An organization-level deny cannot be lifted inside the account. An ordinary IAM shortfall can be fixed in `lab.template`. AWS reports both as `AccessDenied`, so the tool reads the message body.
-- **Explain a failed stack:** `vocareum-diagnose` recovers the CloudFormation failure reason without console access.
 - **Measure stateful features:** The phase runners create a resource, use it, and delete it. Each delete is recorded as a measurement.
 - **One record of results:** `docs/permissions.md` is the only place a permission result is written down.
 
-## Slide 20: Best practices to avoid failures
+## Slide 18: Best practices to avoid failures
 
 Each practice came from something that broke. The tools now enforce the fix.
 
@@ -280,6 +226,50 @@ Three more habits:
 - **Verify after you publish:** `--verify-live` compares the live course with the release. It is cheap, so run it again any time.
 - **Plan for account pools:** Each session can land in a different pooled account. Sweep leftovers before you end a session, and refresh the account pin after a new one starts.
 - **Wait for the stack:** Credentials appear before the template's grants are applied. Checks wait for the stack to finish before they run.
+
+## Slide 19: The same tools for Databricks: dbx-vocareum
+
+[dbx-vocareum](https://github.com/neo4j-partners/dbx-vocareum) is the Databricks counterpart to this repository. Its tools are ported from this one, and they follow the same rules.
+
+| Step | AWS: `aws-vocareum-utils` | Databricks: `dbx-vocareum` |
+| --- | --- | --- |
+| Scaffold a course | `vocareum-course-setup NAME --write-local` | `dbx-vocareum-init lab/` |
+| Publish | `vocareum-release --course NAME --publish` | `dbx-vocareum-upload lab/` |
+| Prove the lab came up | `vocareum-expect --no-start --course NAME` | `dbx-vocareum-diagnose --expect expected.json` |
+| Explain a failure | `vocareum-diagnose` | `dbx-vocareum-diagnose` |
+| Measure permissions | `vocareum-probe` | `dbx-vocareum-probe --all` |
+| End sessions | `vocareum-end-all` | `dbx-vocareum-session --end --yes` |
+| Clean up | `vocareum-sweep --delete --course NAME` | `dbx-vocareum-orphans --delete` |
+| Pre-warm compute | None needed | `dbx-vocareum-pool --create --min-idle 5` |
+
+Every command runs with `uv run`.
+
+- **The same rules:** Each tool only reads unless you pass an explicit flag. Every upload is downloaded back and compared by hash. An exit code of `3` means the stored file differs from the one sent.
+- **No publish step:** The next Start Lab uses whatever was uploaded. Vocareum caches nothing.
+- **Compute is the slow part:** A student waits about 16 minutes for a cluster. An instance pool keeps machines booted on standby and cuts about 10 of those minutes.
+- **The course depends on the tooling:** The Databricks course pulls `dbx-vocareum` in as a git dev dependency. The AWS course is the reverse: it depends on nothing, and the tooling reads it.
+
+## Slide 20: Why Databricks labs are different, and what they need
+
+| | AWS lab | Databricks lab |
+| --- | --- | --- |
+| Isolation | One AWS account per student | One user and one group per student, inside a shared workspace |
+| Setup | `lab.template`, a declarative CloudFormation template | Four shell scripts that run step by step |
+| Failure record | Stack events that name each failed resource | An exit code and captured output in the console Session log |
+| Rollback | CloudFormation rolls the stack back | None. A script that fails halfway leaves half a lab |
+| Student credentials | The session hands back temporary AWS keys | The session hands back none. A token must be made inside a live session |
+| Denied access | `AccessDenied`, with the action in the message | The object looks missing. "Not found" can mean "not allowed" |
+| Workspace | Vocareum assigns an account from a pool | Vocareum creates a workspace per part. The Databricks account tier caps how many can be active |
+
+What a Databricks lab needs:
+
+- **Account admin for Vocareum:** Vocareum's service principal holds the Databricks Account admin role. It uses that role to create workspaces and assign users.
+- **Hooks that report their own failures:** A failing script must exit non-zero and write an `error_code` and a `message`. Otherwise the lab fails with no stated reason.
+- **Shared work once, student work per student:** `workspace_init.sh` gets no user or group, so it builds only what every student shares. Per-student compute and notebooks go in `user_setup.sh`, the only required script.
+- **Idempotent setup:** `workspace_init.sh` runs once per workspace, and one course can have several workspaces. Every step must be safe to run again.
+- **Careful cleanup:** `lab_end.sh` must read the end-lab behavior. On `stop`, it keeps the student's work and removes only billable compute. On `terminate`, it can remove everything.
+- **The right workspace:** The tools must point at the workspace Vocareum created, not one built by hand. Results from any other workspace describe a lab no student enters.
+- **A path to Neo4j:** Vocareum opened port 7687 so clusters can reach Neo4j Aura over Bolt. Neo4j runs in Aura, not inside the workspace.
 
 ## Slide 21: Demo
 
