@@ -1,18 +1,15 @@
-"""Hold `lab.template` to the invariant both sweepers' fail-open rests on.
+"""Hold `lab.template` to the invariant the sweeper's fail-open rests on.
 
-Neither sweeper can read CloudFormation reliably, and both carry on when that
-read fails. `lab.template` states why that is safe, at `SweepReadOwnStack`: the
+The sweeper cannot read CloudFormation reliably, and carries on when that read
+fails. `lab.template` states why that is safe, at `SweepReadOwnStack`: the
 handler reports a refusal and carries on, which is safe only because this
-template declares nothing the selection can match. `read_stack_owned` in
-`workshop_lab.teardown` repeats it, and
-`tests/runtime/test_workshop_lab_teardown.py` pins the behaviour that depends
-on it.
+template declares nothing the selection can match.
 
-Three places assert a property of a fourth file, and nothing checked the fourth
-file. This does. If a future `lab.template` ever declares a resource either
-sweeper would select, the fail-open stops being safe, and the failure would
-otherwise appear as a stack resource deleted out from under a live stack in a
-student's account, at the one moment nobody is watching.
+That is a property of the template, asserted elsewhere, and nothing else checks
+the template itself. This does. If a future `lab.template` ever declares a
+resource the sweeper would select, the fail-open stops being safe, and the
+failure would otherwise appear as a stack resource deleted out from under a live
+stack in a student's account, at the one moment nobody is watching.
 
 Nothing here calls AWS or CloudFormation. The template is parsed, its names are
 rendered the way CloudFormation would render them, and the shared selection rule
@@ -31,7 +28,7 @@ import pytest
 
 from vocareum_tools import sweep
 from vocareum_tools.config import repository_root
-from workshop_lab.selection import (
+from vocareum_tools.selection import (
     AGENTCORE_RUNTIME_LOG_PREFIX,
     WORKSHOP_TAG_KEY,
     WORKSHOP_TAG_VALUE,

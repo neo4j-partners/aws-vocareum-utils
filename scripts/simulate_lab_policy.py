@@ -3,12 +3,12 @@
 # requires-python = ">=3.11"
 # dependencies = ["boto3>=1.34", "botocore>=1.34", "pyyaml>=6"]
 # ///
-"""Ask IAM whether lab.template's grants cover the calls the notebook makes.
+"""Ask IAM whether lab.template's grants cover the calls the lab makes.
 
 Testing a change to ``lab.template`` used to cost a lab launch: upload the file,
-Start Lab, run ``notebooks/lab-01-verify-environment.ipynb``, read the PASS and
-FAIL lines. Launches come from a finite budget and each one rotates the Vocareum
-account pool, so the loop is slow and the evidence expires. This script replaces
+Start Lab, run the verification notebook, read the PASS and FAIL lines. Launches
+come from a finite budget and each one rotates the Vocareum account pool, so the
+loop is slow and the evidence expires. This script replaces
 the permission half of that loop with ``iam:SimulateCustomPolicy``, which
 evaluates the same policy language AWS evaluates, needs no lab session, needs no
 student account, creates nothing, and costs nothing.
@@ -409,7 +409,7 @@ class Result:
 
 
 def build_cases(account_id: str, region: str, prefix: str) -> list[Case]:
-    """The calls notebooks/lab-01-verify-environment.ipynb makes, with real ARNs.
+    """The calls the verification notebook makes, with real ARNs.
 
     Derived from the reconciliation table in ``lab-template-audit.md`` and from
     the notebook's own constants. Every action the notebook calls expects
@@ -858,7 +858,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Simulate lab.template's grants against the calls "
-            "notebooks/lab-01-verify-environment.ipynb makes. No lab session."
+            "the verification notebook makes. No lab session."
         )
     )
     parser.add_argument(

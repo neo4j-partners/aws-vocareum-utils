@@ -1,16 +1,14 @@
-"""Offline tests for the rule both sweepers share.
+"""Offline tests for the shared resource-selection rule.
 
 This module has no client calls in it, so these tests are about meaning rather
-than about wiring. What they pin down is the set of things the two sweepers had
-already disagreed about once: which tag key casing counts, which S3 codes mean
-the bucket is not there, and whether the two ways of matching a log group name
-give the same answer.
+than about wiring. What they pin down is which tag key casing counts, which S3
+codes mean the bucket is not there, and whether the two ways of matching a log
+group name give the same answer.
 
 The last of those is the one worth being explicit about.
 `vocareum_tools.sweep` matches a whole log group name against prefixes moved
-under the AgentCore path; `workshop_lab.teardown` strips the path off the name
-and matches the tail. Both are correct, both suit the code around them, and
-neither is going to be rewritten to look like the other. What must not happen is
+under the AgentCore path; `selection.log_group_tail` strips the path off the
+name so a caller holding one name can match the tail. What must not happen is
 that they stop meaning the same thing, so that equivalence is asserted here
 rather than assumed.
 """
@@ -19,8 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from workshop_lab.naming import Names
-from workshop_lab.selection import (
+from vocareum_tools.selection import (
     AGENTCORE_RUNTIME_LOG_PREFIX,
     BUCKET_GONE_CODES,
     DENIAL_SAMPLE,
@@ -133,27 +130,6 @@ def test_every_name_one_run_creates_is_matched_by_its_own_prefixes(name: str) ->
     assert matches_prefix(name, PREFIXES)
 
 
-def test_the_prefixes_cover_every_name_the_naming_module_builds() -> None:
-    """The two are edited in different files, and a name added to one without a
-    prefix in the other is a resource nothing ever deletes."""
-    names = Names(prefix="verify", account_id=ACCOUNT, region=REGION)
-    built = [
-        names.role("runtime-role"),
-        names.ecr_repository,
-        names.codebuild_project,
-        names.runtime,
-        names.runtime_endpoint,
-        names.memory,
-        names.gateway,
-        names.gateway_target,
-        names.tool_function,
-        names.secret,
-        names.table,
-    ]
-
-    assert [one for one in built if not matches_prefix(one, PREFIXES)] == []
-
-
 def test_a_list_of_prefixes_works_as_well_as_a_tuple() -> None:
     """`str.startswith` takes a tuple and not any iterable, and a caller passing
     a list should get an answer rather than a TypeError at delete-decision
@@ -178,8 +154,8 @@ def test_the_two_ways_of_matching_a_log_group_name_agree(tail: str) -> None:
     """The one divergence that had to be kept rather than removed.
 
     `vocareum_tools.sweep` holds a prefix list and matches whole names;
-    `workshop_lab.teardown` holds one name and matches its tail. Each suits the
-    code around it. This is what stops them meaning different things.
+    `log_group_tail` serves a caller holding one name and matching its tail.
+    This is what stops them meaning different things.
 
     The names are built here rather than parametrised whole, because the
     equivalence only holds for a name that is actually under the AgentCore path,
@@ -234,13 +210,6 @@ def test_the_source_bucket_name_carries_the_account_and_region() -> None:
         source_bucket_name(ACCOUNT, REGION)
         == f"bedrock-agentcore-codebuild-sources-{ACCOUNT}-{REGION}"
     )
-
-
-def test_the_naming_module_builds_the_same_bucket_name() -> None:
-    """Two spellings of one name is one sweeper walking past the bucket."""
-    names = Names(prefix="verify", account_id=ACCOUNT, region=REGION)
-
-    assert names.source_bucket == source_bucket_name(ACCOUNT, REGION)
 
 
 def test_all_three_codes_s3_synthesises_for_an_absent_bucket_are_known() -> None:

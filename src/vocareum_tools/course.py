@@ -126,10 +126,8 @@ def course_content_root(base_env: Path, course: str) -> Path:
 
     ``assets.notebook`` is written relative to this rather than to the asset
     directory, because the notebook is course content and sits beside the other
-    content. The local test course keeps its notebook in ``notebooks/`` at this
-    repository's root, and an external course keeps its own notebook at the root
-    of its own repository, one level above the ``vocareum/`` directory the
-    pointer names.
+    content. An external course keeps its own notebook at the root of its own
+    repository, one level above the ``vocareum/`` directory the pointer names.
     """
     directory = course_directory(base_env, course)
     if course_asset_dir(base_env, course) is None:

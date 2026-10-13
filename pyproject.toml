@@ -16,12 +16,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-# Two packages, not one. `workshop_lab` is the notebook's utility code and is
-# the source of truth for the copy published to the public workshop repository
-# by scripts/sync_workshop_lab.py. It lives here so the offline test suite can
-# import and drive it; hatchling would otherwise only find the package matching
-# the project name.
-packages = ["src/vocareum_tools", "src/workshop_lab"]
+packages = ["src/vocareum_tools"]
 
 [project.scripts]
 vocareum-diagnose = "vocareum_tools.diagnose:main"
@@ -58,9 +53,6 @@ testpaths = ["tests/management"]
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-# The notebook is excluded because its cells reference names defined in earlier
-# cells, so every one of them reads as undefined.
-extend-exclude = ["notebooks/*.ipynb"]
 
 [tool.ruff.lint]
 select = ["B", "C4", "E", "F", "I", "ISC", "PIE", "RUF", "SIM", "UP"]

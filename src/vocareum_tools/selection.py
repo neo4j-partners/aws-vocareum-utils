@@ -1,29 +1,17 @@
-"""What counts as this workshop's resource, in one place for both sweepers.
+"""What counts as this workshop's resource, in one place.
 
-Two programs delete this workshop's leftovers out of a student account, and
-neither can become the other. `workshop_lab.teardown` is step 14 of the
-notebook: it runs under the student session role, knows the one prefix this run
-used, and reports PASS/FAIL rows into the notebook's summary.
-`vocareum_tools.sweep` runs from an instructor's machine against a session it
-opened, knows every name shape any generation of the workshop ever created, and
-exits with a status code an instructor scripts against.
+`vocareum_tools.sweep` deletes this workshop's leftovers out of a student
+account from an instructor's machine, `vocareum_tools.expect` reads the same
+S3 codes, and `tests/management/test_lab_template_selection.py` checks the
+example course's `lab.template` against the same rule. They have to agree on
+how a resource is recognised: which tag key casing counts, how a log group
+under the service's own path is matched, which S3 error codes mean the bucket
+is not there. Drift there is not a style problem. This rule decides what gets
+deleted and what gets left behind in an account that is about to become
+unreachable, so a mistake goes one of two ways: something Vocareum owns is
+deleted, or the run reports a clean account while a runtime keeps billing.
 
-What they do have to agree on is the rule for recognising a resource, and for a
-while they did not. They grew the same five fixes in parallel and ended with two
-answers to one question: which tag key casing counts, how a log group under the
-service's own path is matched, which S3 error codes mean the bucket is not
-there. Drift there is not a style problem. This rule decides what gets deleted
-and what gets left behind in an account that is about to become unreachable, so
-a mistake goes one of two ways: something Vocareum owns is deleted, or the run
-reports a clean account while a runtime keeps billing.
-
-**The vocabulary lives in the published package and the private one imports it,
-and that direction is forced.** `workshop_lab` installs into a student's
-notebook from a public repository; `aws-vocareum` is private and a notebook
-cannot install from it at all. An import the other way would resolve on this
-machine and fail in every lab.
-
-There are no client calls and no deletes here. Each program still enumerates and
+There are no client calls and no deletes here. Each caller still enumerates and
 deletes with the permissions and the reporting shape it has.
 """
 
@@ -96,7 +84,7 @@ def name_prefixes(prefix: str) -> tuple[str, ...]:
     `vocareum_tools.sweep` does not call this to build its own list, because its
     list is the union across every generation of names that could still be
     sitting in a pooled account. It does have to remain a superset of this, and
-    `tests/test_sweep.py` asserts exactly that.
+    `tests/management/test_sweep.py` asserts exactly that.
     """
     return (
         prefix,
@@ -248,7 +236,7 @@ def log_group_prefixes(prefixes: Iterable[str]) -> tuple[str, ...]:
 
     `log_group_tail` is the same test written the other way round, for a caller
     holding one name rather than a prefix list, and
-    `tests/test_workshop_lab_selection.py` proves the two agree.
+    `tests/management/test_selection.py` proves the two agree.
     """
     return tuple(AGENTCORE_RUNTIME_LOG_PREFIX + one for one in prefixes)
 

@@ -142,75 +142,16 @@ uv run vocareum-release --course NAME --restore RELEASE_ID
 
 ## What is in this repository
 
-This repository holds the tools that publish, check, and clean up a course. It also holds the first course, `neo4j-fundamentals`, and the record of what the student account allows.
+This repository holds the tools that publish, check, and clean up a course. It also holds a small example course, `neo4j-fundamentals`, and the record of what the student account allows.
 
 - **`src/vocareum_tools/`:** This Python package holds every command-line tool, such as upload, release, expect, diagnose, and sweep.
-- **`src/workshop_lab/`:** This package holds the helper classes the `neo4j-fundamentals` notebook runs. The notebook installs it from a tag in the public workshop repository, so an edit here reaches students only after it is synced and tagged there.
-- **`scripts/`:** This folder holds the scripts that have no `uv run vocareum-*` command. These are the stateful permission tests, the helper-package release tools, and the offline gate `validate_all.py`.
+- **`scripts/`:** This folder holds the scripts that have no `uv run vocareum-*` command. These are the stateful permission tests and the offline gate `validate_all.py`.
 - **`courses/`:** This folder holds one env file per course. It also holds the asset folder for `neo4j-fundamentals`.
-- **`notebooks/`:** This folder holds the `neo4j-fundamentals` student notebook.
 - **`docs/`:** These guides cover deploying, diagnosing, permissions, the Vocareum API, and cost.
-- **`tests/`:** Every test runs offline. `tests/management/` covers the tools, and `tests/runtime/` covers `workshop_lab`.
+- **`tests/`:** Every test runs offline. `tests/management/` covers the tools.
 - **Probe templates:** `lab-probe.template` and `lab-bedrock.template` run test calls from a temporary Lambda role. They find the limits the AWS organization sets on the account.
 
 ## Admin scripts
-
-### Publishing the helper package
-
-The notebook installs `workshop_lab` from a **tag** in the public workshop repository, so an edit under `src/workshop_lab/` reaches no student until it is synced, committed, tagged, and pushed there.
-
-- **The order is fixed:** Bump and sync first, then tag. A wrong order gives no error.
-- **Why the order matters:** The install URL is written inside the package it installs, in the docstring of `src/workshop_lab/__init__.py`.
-- **What a wrong order does:** A tag cut before that edit serves a docstring naming the previous ref. `release_check.py --fetch` reports it as *served stale: the archive is not the source*.
-
-#### 1. Bump the version
-
-Change `__version__` and the install URL in the three places that hold them. The test checks that all three copies match.
-
-```bash
-# Bump __version__ and all three copies of the install URL, here:
-#   src/workshop_lab/__init__.py                (__version__ and the docstring URL)
-#   notebooks/lab-01-verify-environment.ipynb   (step0-code)
-#   notebooks/README.md
-uv run pytest tests/management/test_notebook_install_url.py
-```
-
-#### 2. Sync into the workshop repository
-
-This step copies `src/workshop_lab/` into `../neo4j-sec-filings-graphrag-workshop/staging/`. Run `--check` first to see whether the published copy is stale.
-
-```bash
-./scripts/sync_workshop_lab.py --check    # is the published copy stale?
-./scripts/sync_workshop_lab.py            # publish
-```
-
-#### 3. Commit, tag, and push
-
-This step runs the release script in the workshop repository. Nothing before this step reaches a student.
-
-```bash
-../neo4j-sec-filings-graphrag-workshop/scripts/release.py           # show the plan
-../neo4j-sec-filings-graphrag-workshop/scripts/release.py --push    # commit, tag, push
-```
-
-- **Where it lives:** `release.py` is in the workshop repository, because that is the repository it commits to.
-- **Version:** It takes no version argument. It reads `staging/workshop_lab/__init__.py` and stops if `staging/pyproject.toml` disagrees.
-- **Existing tags:** It refuses to move a tag that already exists locally or on the remote. Moving a tag changes what step 0 installs for anyone who already ran it, while the version they see printed stays the same. The fix is a bump and a re-sync, not a retag.
-
-#### 4. Confirm GitHub serves the release
-
-This step checks that GitHub serves what this repository holds.
-
-```bash
-./scripts/release_check.py                # everything local
-./scripts/release_check.py --fetch        # also download the pinned ref
-./scripts/release_check.py --gate --course graphrag  # inspect an open lab too
-./scripts/release_check.py --skip-build   # ref and publication only, fast
-```
-
-- **Before the tag is pushed:** `release_check.py --fetch` reports three findings, and all three are true. The tag does not exist, the sync is uncommitted, and the archive URL returns 404.
-- **Exit 0:** The ref a student installs, the files behind it, and the version step 0 prints all agree.
-- **Students with an open kernel:** A kernel that already imported the package keeps the old objects through a reinstall. The version line step 0 prints is the only signal a fix landed. The remedy is Restart Kernel, not re-run.
 
 ### Day to day
 
@@ -219,18 +160,14 @@ A handful of `uv run vocareum-*` commands cover the rest of the work.
 - **Safe by default:** Each command shows what it would do and changes nothing until you pass the flag.
 - **Order matters:** Sweep before you end a session. Ending a session gives the AWS account back to the pool, which wipes it and allocates a different one next time. Anything left behind becomes unreachable.
 
-#### Upload the template and notebook
+#### Upload the template
 
 `vocareum-upload` puts a file into the Vocareum workspace. `--dry-run` shows what would be sent.
 
 ```bash
 uv run vocareum-upload --dry-run --course neo4j-fundamentals
 uv run vocareum-upload --course neo4j-fundamentals
-uv run vocareum-upload notebooks/lab-01-verify-environment.ipynb --target startercode --course neo4j-fundamentals
 ```
-
-- **Notebook only:** Upload only the notebook. Do not upload helper files beside it.
-- **Helper classes:** The notebook installs its helper classes from GitHub instead. `sync_workshop_lab.py` serves them there.
 
 #### Sweep leftovers from the account
 
@@ -243,8 +180,7 @@ uv run vocareum-sweep --delete --course neo4j-fundamentals
 
 - **Stack resources:** The sweep never touches resources the lab CloudFormation stack owns. Vocareum deletes that stack itself at session end.
 - **How it finds resources:** It finds everything else by tag and by name prefix. It polls each delete instead of trusting one that returned.
-- **Shared rule:** `src/workshop_lab/selection.py` decides what counts as a workshop resource. The notebook's own step 14 teardown reads the same module.
-- **Why the rule is shared:** The two programs run as different principals and report differently, so neither can replace the other. A disagreement about which resource is ours would leave something billing in an account that is about to become unreachable.
+- **Selection rule:** `src/vocareum_tools/selection.py` decides what counts as a workshop resource.
 
 #### End lab sessions
 
@@ -356,11 +292,10 @@ Every tool takes `--course NAME`, which layers `courses/NAME.env` over the root 
 
 | File | What it is |
 | --- | --- |
-| `courses/neo4j-fundamentals/lab.template` | The first course's CloudFormation template. It creates the no-cost proof resources and the inline session-role grants required by the verification notebook |
+| `courses/neo4j-fundamentals/lab.template` | The example course's CloudFormation template. It creates the no-cost proof resources and the inline session-role grants required by the verification notebook |
 | `lab-bedrock.template` | A Bedrock probe that runs as a temporary Lambda execution role. It diagnoses the account and organization ceiling, not the student or template-deployer role |
 | `lab-probe.template` | The same temporary-Lambda approach generalized. Takes API calls as a parameter and reports a verdict per call as a stack Output |
 | `docs/` | The reference documents linked above |
-| `notebooks/` | Notebooks that ship to students through the Vocareum workspace, plus the upload and Publish Notebook steps |
 | `uv run vocareum-upload` | Replaces a file in the Vocareum workspace over the API, waits for the write, then downloads it back and compares hashes |
 | `uv run vocareum-diagnose` | Recovers the CloudFormation failure reason from a lab that reported `CREATE_FAILED`, with no console access |
 | `uv run vocareum-refresh` | Reads an already-open session and atomically refreshes its account and stack pins. Refuses zero or multiple active stacks and never starts or extends a session |
@@ -374,11 +309,8 @@ Every tool takes `--course NAME`, which layers `courses/NAME.env` over the root 
 | `uv run vocareum-end-all` | Ends every student's session on the part, read from the course roster, since there is no bulk endpoint and no End Lab button in the student's AWS view |
 | `uv run vocareum-report-spend` | Reads the course roster and every student's own session record to total AWS spend for the whole cohort. Read-only: starts, extends, and ends nothing |
 | `uv run vocareum-restart-student` | Safely restarts one student's cloud session by roster email; dry run by default and requires `--yes` because it gives up the student's AWS account, while preserving their workarea |
-| `scripts/sync_workshop_lab.py` | Publishes `src/workshop_lab/` into the public workshop repository's `staging/`, which is where the student notebook installs it from. `--check` exits 1 when the published copy is stale |
 | `src/vocareum_tools/` | Installable Python package behind every `vocareum-*` command, including shared configuration, API, transaction, redaction, and phase-runner code |
-| `src/workshop_lab/` | The classes the student notebook runs on: the credential, account, and region guards, the check harness, the resource naming, the IAM execution roles, the container build source, the CodeBuild build, the registry copy, and the Neo4j probe. Source of truth for a package the notebook installs from GitHub, because a helper file shipped beside a notebook does not reach a Vocareum workspace. The installable copy is published to the workshop repository |
 | `tests/management/` | Focused offline tests for course definitions, inspection, scaffolding, release, rollback, and the supporting management tools |
-| `tests/runtime/` | Offline tests for the student-facing `workshop_lab` package and notebook runtime contract |
 | `pyproject.toml` | Python dependencies, command entry points, and Ruff/pytest configuration |
 | `.env.example` | Template for the `.env` the scripts read. Copy it, fill it in, and never commit the result |
 
@@ -401,7 +333,6 @@ For development:
 ```bash
 uv sync --group dev
 uv run pytest                     # focused management suite
-uv run pytest tests/runtime       # student runtime suite
 ./scripts/validate_all.py         # complete CI and pre-release gate
 uv run ruff check .
 uv run ruff format --check .

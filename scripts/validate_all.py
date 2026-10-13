@@ -37,7 +37,7 @@ LINTED_COURSES = ("neo4j-fundamentals", "graphrag")
 MAX_INLINE_TEMPLATE_BYTES = 51_200
 
 CHECKS = (
-    [PYTHON, "-m", "pytest", "tests/management", "tests/runtime"],
+    [PYTHON, "-m", "pytest", "tests/management"],
     [PYTHON, "-m", "ruff", "check", "."],
     [PYTHON, "-m", "ruff", "format", "--check", "."],
 )

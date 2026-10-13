@@ -29,11 +29,10 @@ def test_first_course_assets_are_the_exact_pre_migration_bytes() -> None:
     assert not (root / "expected.json").exists()
 
 
-def test_first_course_definition_binds_its_notebook_and_cleanup_rules() -> None:
+def test_first_course_definition_binds_its_cleanup_rules() -> None:
     root = repository_root()
     definition = load_definition(root / ".env", FIRST_COURSE)
 
-    assert definition.notebook == "notebooks/lab-01-verify-environment.ipynb"
     assert "verify" in definition.cleanup.resource_prefixes
     assert "workshop-" in definition.cleanup.iam_role_prefixes
     assert "bedrock-agentcore-codebuild-sources" in (

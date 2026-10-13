@@ -286,7 +286,7 @@ def test_a_bucket_that_answers_404_is_missing() -> None:
     client = FakeClient({"head_bucket": error("404")})
 
     # S3 answers a HEAD with a bare 404 and no code, which is why the absence
-    # codes are per kind and shared with workshop_lab.selection.
+    # codes are per kind and shared with vocareum_tools.selection.
     assert check(gate(s3=client), "buckets", "b").presence is Presence.MISSING
 
 

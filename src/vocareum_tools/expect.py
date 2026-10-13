@@ -47,8 +47,6 @@ from typing import Any
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from workshop_lab.selection import BUCKET_GONE_CODES
-
 from .client import ApiError
 from .config import ConfigError, Environment, add_course_argument, repository_root
 from .course import manifest_path as course_manifest_path
@@ -63,6 +61,7 @@ from .probe import (
     load_config,
     open_guarded_session,
 )
+from .selection import BUCKET_GONE_CODES
 
 EXIT_OK = 0
 EXIT_CONFIG = 1

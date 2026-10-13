@@ -24,8 +24,7 @@ from botocore.exceptions import ClientError
 
 from vocareum_tools import phase, sweep
 from vocareum_tools.course import CleanupRules
-from workshop_lab.naming import Names
-from workshop_lab.selection import TagReads, matches_prefix, name_prefixes
+from vocareum_tools.selection import TagReads, matches_prefix, name_prefixes
 
 
 def client_error(code: str, message: str = "no", operation: str = "Op") -> ClientError:
@@ -691,7 +690,7 @@ def test_the_lambda_and_ecr_names_the_notebook_uses_are_matched() -> None:
 
 
 def test_this_list_stays_a_superset_of_the_one_the_notebook_sweeps_with() -> None:
-    """The claim `workshop_lab.selection.name_prefixes` makes about this file.
+    """The claim `selection.name_prefixes` makes about this file.
 
     The two lists are deliberately different and neither is derived from the
     other: the notebook knows the one prefix its own run used, and this list is
@@ -709,28 +708,6 @@ def test_this_list_stays_a_superset_of_the_one_the_notebook_sweeps_with() -> Non
         for one in name_prefixes("verify")
         if not matches_prefix(one, sweep.NAME_PREFIXES)
     ]
-
-    assert missed == []
-
-
-def test_every_role_the_notebook_names_is_in_scope_for_the_iam_prefixes() -> None:
-    """IAM is the one kind selected by name alone.
-
-    `require_prefix` switches off the tag half for roles, deliberately: the
-    account holds Vocareum's own voclabs and vocareum roles, and a role
-    selectable by tag would be deletable the moment anything tagged one. The
-    cost is that a role name outside these prefixes has nothing left to catch
-    it, so the names `workshop_lab.naming` actually builds are checked against
-    them here rather than assumed.
-
-    This is a narrower claim than the one above on purpose. The full
-    `name_prefixes` list is not a subset of these, and should not be: the
-    notebook only ever names a role `workshop-<prefix>-<suffix>`.
-    """
-    names = Names(prefix="verify", account_id=ACCOUNT, region="us-east-1")
-    built = [names.role("runtime-role"), names.role("codebuild-role")]
-
-    missed = [one for one in built if not matches_prefix(one, sweep.IAM_ROLE_PREFIXES)]
 
     assert missed == []
 

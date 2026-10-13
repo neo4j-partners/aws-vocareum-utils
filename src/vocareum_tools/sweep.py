@@ -86,16 +86,11 @@ was written against, so all three are handled here rather than noted as known
 gaps.
 
 **The rule for recognising a resource is not defined here.** It is
-``workshop_lab.selection``, which the notebook's own step 14 teardown imports
-too. Closing those same three gaps twice in parallel produced two answers to one
-question -- which tag key casing counts, how a log group under the service's own
-path is matched, which S3 codes mean the bucket is not there -- and a
-disagreement there decides what gets deleted out of an account that is about to
-become unreachable. The shared module lives in ``workshop_lab`` and not here
-because ``workshop_lab`` is the package a student's notebook installs, alone,
-from the workshop repository. This package is never installed in a lab, so an
-import the other way round would resolve on an instructor's machine and fail in
-every lab.
+``vocareum_tools.selection``, kept in one module so that which tag key casing
+counts, how a log group under the service's own path is matched, and which S3
+codes mean the bucket is not there each have one answer. A disagreement there
+decides what gets deleted out of an account that is about to become
+unreachable.
 
 What stays here is what only an instructor has. This module's ``NAME_PREFIXES``
 is the union across every generation of names that could still be sitting in a
@@ -117,21 +112,6 @@ from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from workshop_lab.selection import (
-    AGENTCORE_RUNTIME_LOG_PREFIX,
-    BUCKET_GONE_CODES,
-    IMPLICIT_ENDPOINT,
-    S3_SOURCE_BUCKET_STEM,
-    WORKSHOP_TAG_KEY,
-    WORKSHOP_TAG_VALUE,
-    TagReads,
-    log_group_prefixes,
-    selected_by,
-    source_bucket_name,
-    stack_owned_keys,
-    tag_map,
-)
-
 from .client import ApiError
 from .config import ConfigError, Environment, add_course_argument, repository_root
 from .course import CleanupRules, load_definition
@@ -145,6 +125,20 @@ from .probe import (
     open_guarded_session,
 )
 from .security import redact_text
+from .selection import (
+    AGENTCORE_RUNTIME_LOG_PREFIX,
+    BUCKET_GONE_CODES,
+    IMPLICIT_ENDPOINT,
+    S3_SOURCE_BUCKET_STEM,
+    WORKSHOP_TAG_KEY,
+    WORKSHOP_TAG_VALUE,
+    TagReads,
+    log_group_prefixes,
+    selected_by,
+    source_bucket_name,
+    stack_owned_keys,
+    tag_map,
+)
 
 # Every name shape the workshop and the verification notebook create, as a
 # startswith tuple. Written out rather than derived from PREFIX = "verify",
@@ -207,9 +201,9 @@ IAM_ROLE_PREFIXES: tuple[str, ...] = (
 )
 
 # The composed form of the shared prefixes, for the one kind whose names do not
-# start with a workshop name. `workshop_lab.selection.log_group_tail` is the same
-# test written the other way round, for the notebook's teardown, which holds one
-# name rather than a prefix list; a test there proves the two agree.
+# start with a workshop name. `selection.log_group_tail` is the same test written
+# the other way round, for a caller holding one name rather than a prefix list;
+# tests/management/test_selection.py proves the two agree.
 LOG_GROUP_PREFIXES: tuple[str, ...] = log_group_prefixes(NAME_PREFIXES)
 
 # The build-source bucket stem is the whole prefix list for the bucket kind, so
@@ -443,9 +437,9 @@ def selection_reason(
 ) -> str:
     """Say why a candidate is in scope, or return an empty string for out of scope.
 
-    The rule itself is ``workshop_lab.selection.selected_by``, shared with the
-    notebook's own teardown. This is the ``Candidate``-shaped call into it, kept
-    because every handler here holds a candidate and nothing else.
+    The rule itself is ``selection.selected_by``. This is the
+    ``Candidate``-shaped call into it, kept because every handler here holds a
+    candidate and nothing else.
     """
     return selected_by(
         candidate.name,
