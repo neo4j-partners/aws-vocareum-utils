@@ -21,6 +21,9 @@ DECKS="webinar-overview-slides"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
+# Images the decks reference by relative path, such as images/two-principals.svg.
+cp -R "$SRC/images" "$OUT/images"
+
 for deck in $DECKS; do
   echo "  building $deck"
   "$MARP" --allow-local-files "$SRC/$deck.md" -o "$OUT/$deck.html"

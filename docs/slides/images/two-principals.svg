@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 440" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>Two principals in every student account</title>
+  <desc>The deployer role runs lab.template through CloudFormation and attaches RolePolicy grants to the student session role, which runs the notebook code. Organization SCPs apply to both roles.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0a6190"/>
+    </marker>
+    <marker id="deny" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b03a2e"/>
+    </marker>
+  </defs>
+
+  <!-- Student account boundary -->
+  <rect x="10" y="10" width="1080" height="420" rx="14" fill="#f7fafc" stroke="#0a6190" stroke-width="2" stroke-dasharray="10 6"/>
+  <text x="40" y="50" font-size="22" font-weight="600" fill="#0a6190">Student AWS account, one per student</text>
+
+  <!-- Deployer role -->
+  <rect x="60" y="76" width="380" height="224" rx="10" fill="#e6f0f6" stroke="#0a6190" stroke-width="2"/>
+  <text x="250" y="116" text-anchor="middle" font-size="26" font-weight="700" fill="#1a1a1a">Deployer role</text>
+  <text x="250" y="146" text-anchor="middle" font-size="18" fill="#444" font-family="SFMono-Regular, Menlo, Consolas, monospace">assumed-role/vocareum/…</text>
+  <text x="250" y="200" text-anchor="middle" font-size="22" fill="#1a1a1a">Runs <tspan font-family="SFMono-Regular, Menlo, Consolas, monospace">lab.template</tspan></text>
+  <text x="250" y="232" text-anchor="middle" font-size="22" fill="#1a1a1a">at Start Lab, through</text>
+  <text x="250" y="264" text-anchor="middle" font-size="22" fill="#1a1a1a">CloudFormation</text>
+
+  <!-- Student session role -->
+  <rect x="660" y="76" width="380" height="224" rx="10" fill="#e6f0f6" stroke="#0a6190" stroke-width="2"/>
+  <text x="850" y="116" text-anchor="middle" font-size="26" font-weight="700" fill="#1a1a1a">Student session role</text>
+  <text x="850" y="146" text-anchor="middle" font-size="18" fill="#444" font-family="SFMono-Regular, Menlo, Consolas, monospace">assumed-role/voclabs/user*</text>
+  <text x="850" y="200" text-anchor="middle" font-size="22" fill="#1a1a1a">Runs the notebook code</text>
+  <text x="850" y="232" text-anchor="middle" font-size="22" fill="#1a1a1a">Calls Bedrock, AgentCore,</text>
+  <text x="850" y="264" text-anchor="middle" font-size="22" fill="#1a1a1a">and the workshop IAM roles</text>
+
+  <!-- Grant arrow -->
+  <line x1="442" y1="188" x2="654" y2="188" stroke="#0a6190" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="550" y="174" text-anchor="middle" font-size="20" fill="#0a6190" font-weight="600">attaches</text>
+  <text x="550" y="216" text-anchor="middle" font-size="18" fill="#0a6190" font-family="SFMono-Regular, Menlo, Consolas, monospace">RolePolicy</text>
+  <text x="550" y="240" text-anchor="middle" font-size="20" fill="#0a6190" font-weight="600">grants</text>
+
+  <!-- Organization SCPs -->
+  <line x1="250" y1="342" x2="250" y2="306" stroke="#b03a2e" stroke-width="3" marker-end="url(#deny)"/>
+  <line x1="850" y1="342" x2="850" y2="306" stroke="#b03a2e" stroke-width="3" marker-end="url(#deny)"/>
+  <rect x="60" y="342" width="980" height="60" rx="10" fill="#fbeae8" stroke="#b03a2e" stroke-width="2"/>
+  <text x="550" y="380" text-anchor="middle" font-size="22" fill="#1a1a1a"><tspan font-weight="700" fill="#b03a2e">Organization SCPs</tspan> apply to both roles. Nothing in the account lifts them.</text>
+</svg>

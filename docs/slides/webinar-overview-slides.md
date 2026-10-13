@@ -153,17 +153,29 @@ The course and its Vocareum assets live in the public neo4j-hotel-booking-agent-
 
 ---
 
+<!-- _class: dense -->
+
 ## Hands-On Workshop with Neo4j and Databricks
 
-- **Students build:** A fleet agent over two databases
-- **Neo4j Aura:** Fleet relationships and maintenance manuals
-- **Databricks Lakehouse:** Sensor telemetry
+- **Students build:** An agent for a commercial aviation fleet
+- **The fleet:** 36 synthetic jets, five models, four airlines
+- **Neo4j Aura:** Aircraft, flights, maintenance, five manuals
+- **Databricks Lakehouse:** 90 days of engine sensor readings
 - **LangGraph supervisor:** Routes each question to the right database
+- **Example:** "Which aircraft has the highest average vibration, and has it had any maintenance events?"
 - **Provisioning:** Four Vocareum hooks, no CloudFormation
 - **Repository:** [databricks-neo4j-workshop](https://github.com/neo4j-partners/databricks-neo4j-workshop)
 
 <!--
 Students build an AI agent that answers questions about a commercial aviation fleet. It works over two databases at once.
+
+The fleet is a synthetic aircraft digital twin. It has 36 aircraft across five models: B737-800, A320-200, A321neo, E190, and A220-300. Four fictional airlines operate nine aircraft each. Each aircraft has two engines plus avionics and hydraulics. Each engine carries four sensors: exhaust gas temperature, vibration, N1 fan speed, and fuel flow.
+
+Neo4j holds the relationships. That covers the fleet structure, 40 airports, about 14,500 flights and their delays, maintenance events, and component removals. It also holds the five maintenance manuals, one per aircraft model, chunked for semantic search.
+
+Databricks holds the telemetry. That is 155,520 engine sensor readings over 90 days, in a Delta table that a Genie agent queries in plain English.
+
+The data is correlated on purpose. Engines that degrade faster cross warning thresholds sooner, and those crossings trigger the maintenance events in the graph. So the example question needs both databases. Databricks finds the aircraft with the highest vibration. Neo4j finds its maintenance history.
 
 Six labs: Neo4j Aura setup, Databricks ETL to Neo4j, semantic search with GraphRAG, a Genie agent, a LangGraph agent, and agent memory in the graph. An optional appendix covers graph analytics.
 
@@ -486,20 +498,7 @@ Creating the course, assignment, and part is still done in the Vocareum web UI.
 
 ## Two Principals in Every Student Account
 
-```
-┌──────────────────── Student AWS account, one per student ─────────────────────┐
-│                                                                               │
-│   Deployer role                              Student session role             │
-│   assumed-role/vocareum/...                  assumed-role/voclabs/user*       │
-│  ┌───────────────────────────┐              ┌───────────────────────────┐     │
-│  │ Runs lab.template at      │   attaches   │ Runs the notebook code    │     │
-│  │ Start Lab, through        ├─────────────►│ Calls Bedrock, AgentCore, │     │
-│  │ CloudFormation            │  RolePolicy  │ and the workshop IAM roles│     │
-│  └───────────────────────────┘    grants    └───────────────────────────┘     │
-│                                                                               │
-│   Organization SCPs apply to both roles. Nothing in the account lifts them.   │
-└───────────────────────────────────────────────────────────────────────────────┘
-```
+![w:1100](images/two-principals.svg)
 
 - **A result for one is not a result for the other:** Measure each role on its own
 
