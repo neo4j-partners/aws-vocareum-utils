@@ -1,0 +1,918 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Cost controls for the shared instructor-account Bedrock API key. Deploys into
+  the configured instructor account in us-east-1.
+
+  Three controls, in order of how fast they act. A CloudWatch circuit breaker
+  deactivates the shared credential within about 90 seconds of a runaway. Bedrock
+  model invocation logging records what was sent, so a postmortem can name the
+  notebook cell that ran away. An AWS Budget mails the instructor when the
+  account's Bedrock spend crosses a threshold, hours later.
+
+  Deploy with uv run bedrock-key/admin.py deploy, which reads every parameter
+  value from bedrock-key/arns.env. Do not deploy this file by hand, because the
+  parameter defaults below are deliberately absent for values that must match
+  the live credential.
+
+# ---------------------------------------------------------------------------
+# Why the breaker measures dollars rather than calls
+#
+# The burn is denominated in tokens, not in requests. One InvokeModel call can
+# carry two hundred tokens or two hundred thousand, so an alarm on Invocations
+# has no fixed relationship to money and would need a threshold that is wrong
+# by three orders of magnitude in one direction or the other.
+#
+# A raw token count is closer but still wrong, because the three workshop models
+# are not priced alike. Claude Sonnet 4.6 output costs $15 per million tokens.
+# Titan Text Embeddings V2 input costs $0.02 per million. A token-count alarm
+# sized for chat would never see an embedding runaway, and a token-count alarm
+# sized for embeddings would trip on the Module 1 ingest burst, which is
+# legitimate work that costs under a cent per minute.
+#
+# So the breaker alarms on a CloudWatch metric math expression that weights each
+# model's token counts by that model's published price and yields estimated US
+# dollars per minute. That is the unit the threshold is reasoned about in, the
+# unit the operator sees on the dashboard, and the unit the budget is written in.
+#
+# Measured 2026-08-26 with cloudwatch:ListMetrics against account ${BEDROCK_KEY_ACCOUNT_ID}:
+# the cross-region profile publishes under ModelId "us.anthropic.claude-sonnet-4-6"
+# in us-east-1 only, not under the underlying foundation-model id and not in the
+# us-east-2 or us-west-2 fan-out regions. One alarm in us-east-1 therefore sees
+# the whole chat spend. The same call found unrelated Sonnet 5 and global-profile
+# traffic in this account, which is why every metric below is pinned to a
+# ModelId dimension instead of using the account-wide rollup.
+# ---------------------------------------------------------------------------
+
+Parameters:
+
+  KeyUserName:
+    Type: String
+    Description: IAM user that owns the shared Bedrock key. From BEDROCK_KEY_USER_NAME.
+
+  KeyCredentialId:
+    Type: String
+    AllowedPattern: "^ACCA[A-Z0-9]+$"
+    Description: >-
+      Service-specific credential id the breaker deactivates. From
+      BEDROCK_KEY_CREDENTIAL_ID. This is an identifier, not a secret.
+
+  ChatModelId:
+    Type: String
+    Description: Cross-region chat profile id. From WORKSHOP_CHAT_MODEL_ID.
+
+  EmbedModelId:
+    Type: String
+    Description: Retrieval embedding model id. From WORKSHOP_EMBED_MODEL_ID.
+
+  MemoryEmbedModelId:
+    Type: String
+    Description: Agent-memory embedding model id. From WORKSHOP_MEMORY_EMBED_MODEL_ID.
+
+  AlertEmail:
+    Type: String
+    Description: >-
+      Address that receives the breaker notice and every budget alert. From
+      BEDROCK_KEY_ALERT_EMAIL. admin.py manages the SNS email subscription and
+      confirms it with authenticated unsubscribe protection. The budget also
+      sends directly to this address.
+
+  InvocationLogGroupName:
+    Type: String
+    Default: /aws/bedrock/graphrag-workshop-invocations
+    Description: From BEDROCK_KEY_INVOCATION_LOG_GROUP.
+
+  InvocationLogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90]
+    Description: >-
+      Invocation logging records prompts and completions verbatim, so this group
+      holds student-authored text. Fourteen days is the shortest retention that
+      still covers a postmortem in the week after a Thursday class. Anything
+      longer keeps student text with no operational use for it.
+
+  # The four tuning knobs. admin.py deploy sets all four from arns.env, so
+  # a threshold change is an edit to arns.env and a redeploy, never an edit to
+  # this file. The bounds below exist so a typo cannot deploy a nonsense
+  # breaker. CONTROLS.md carries the arithmetic behind the defaults.
+  BurstThresholdUsdPerMinute:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 500
+    Description: >-
+      One minute above this estimated spend rate deactivates the key. Set from
+      BEDROCK_KEY_BURST_USD_PER_MINUTE. The floor is 1 rather than 0 because a
+      threshold of 0 deactivates the key on the first token anyone sends.
+
+  SustainedThresholdUsdPerMinute:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    MaxValue: 500
+    Description: >-
+      A run of consecutive five-minute periods each averaging above this rate
+      deactivates the key. Set from BEDROCK_KEY_SUSTAINED_USD_PER_MINUTE. The
+      run length is SustainedEvaluationPeriods. This catches a slow burn that
+      never touches the burst threshold. Keep it below the burst threshold.
+      admin.py refuses to deploy if it is not.
+
+  SustainedEvaluationPeriods:
+    Type: Number
+    Default: 3
+    MinValue: 2
+    MaxValue: 24
+    Description: >-
+      How many consecutive five-minute periods the sustained alarm needs before
+      it trips. Set from BEDROCK_KEY_SUSTAINED_PERIODS. Three periods is fifteen
+      minutes. The floor is 2 because a one-period sustained alarm is only a
+      slower burst alarm.
+
+  WorkshopTotalUsd:
+    Type: Number
+    Default: 850
+    MinValue: 0.000001
+    MaxValue: 100000
+    Description: >-
+      Estimated spend across the workshop models in the trailing four hours
+      that deactivates the key. Set from BEDROCK_KEY_TOTAL_USD. This is a trip
+      threshold rather than a guaranteed billing ceiling, so leave room for
+      metric publication, alarm delivery, and calls already in flight.
+
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 800
+    Description: Account-wide Bedrock cost budget for the month of the class.
+
+  BudgetServiceFilters:
+    Type: CommaDelimitedList
+    Default: "Amazon Bedrock,Claude Sonnet 4.6 (Amazon Bedrock Edition)"
+    Description: >-
+      Cost Explorer SERVICE dimension values the budget counts. Third-party
+      models on Bedrock bill under their own service value, not under "Amazon
+      Bedrock", so a budget naming only "Amazon Bedrock" would miss every dollar
+      of chat spend and count only the embeddings. Measured with
+      ce:GetDimensionValues against account ${BEDROCK_KEY_ACCOUNT_ID} on 2026-08-26, which
+      returned four values: "Amazon Bedrock", "Amazon Bedrock AgentCore",
+      "Claude Sonnet 4.6 (Amazon Bedrock Edition)", and "Claude Sonnet 5
+      (Amazon Bedrock Edition)". The two omitted values are unrelated account
+      work. Re-read the list if the workshop's model set changes.
+
+  ChatInputUsdPerMillion:
+    Type: Number
+    Default: 3
+    Description: >-
+      Assumed Claude Sonnet 4.6 input rate. The AWS Price List API returns no
+      us-east-1 row for a us. cross-region profile, so this is the first-party
+      published rate rather than a measured one.
+
+  ChatOutputUsdPerMillion:
+    Type: Number
+    Default: 15
+    Description: Assumed Claude Sonnet 4.6 output rate. Same caveat as the input rate.
+
+  EmbedUsdPerMillion:
+    Type: Number
+    Default: 0.135
+    Description: >-
+      Nova 2 Multimodal Embeddings text input. Measured from the AWS Price List
+      API on 2026-08-26 as $0.000135 per 1K tokens.
+
+  MemoryEmbedUsdPerMillion:
+    Type: Number
+    Default: 0.02
+    Description: >-
+      Titan Text Embeddings V2 input. Measured from the AWS Price List API on
+      2026-08-26 as $0.00002 per 1K tokens.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Notification path. The alarm cannot call IAM, so it publishes to SNS, SNS
+  # invokes the breaker Lambda, and the Lambda calls IAM.
+  # -------------------------------------------------------------------------
+
+  BreakerTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-breaker"
+      DisplayName: Workshop Bedrock key breaker
+      Tags:
+        - Key: WorkshopResource
+          Value: graphrag-with-neo4j
+
+  BreakerTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref BreakerTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarmsToPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref BreakerTopic
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  # -------------------------------------------------------------------------
+  # The breaker Lambda.
+  # -------------------------------------------------------------------------
+
+  # Created explicitly so the execution role's logs grant can name one group
+  # rather than every group in the account.
+  BreakerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-breaker"
+      RetentionInDays: 14
+
+  BreakerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: deactivate-one-bedrock-key
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # iam:UpdateServiceSpecificCredential accepts only the "user"
+              # resource type, and its one condition key is
+              # iam:ServiceSpecificCredentialServiceName. Verified against the
+              # AWS IAM service reference on 2026-08-26. IAM has no condition
+              # key for a credential id, so the tightest grant expressible is
+              # one action, on one user, for one service name. The credential id
+              # itself is pinned in the function's environment and is the only
+              # id the code ever passes.
+              - Sid: DeactivateTheSharedBedrockKeyOnly
+                Effect: Allow
+                Action: iam:UpdateServiceSpecificCredential
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/workshop/${KeyUserName}"
+                Condition:
+                  StringEquals:
+                    iam:ServiceSpecificCredentialServiceName: bedrock.amazonaws.com
+              # The Arn attribute of a log group already ends in ":*", which is
+              # the every-stream-in-this-group form. Appending a second ":*"
+              # produced ":*:*" and matched only by wildcard luck.
+              - Sid: WriteOwnLogsOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt BreakerFunctionLogGroup.Arn
+      Tags:
+        - Key: WorkshopResource
+          Value: graphrag-with-neo4j
+
+  BreakerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: BreakerFunctionLogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-breaker"
+      Description: Deactivates the shared workshop Bedrock key when a spend alarm fires.
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt BreakerFunctionRole.Arn
+      Environment:
+        Variables:
+          KEY_USER_NAME: !Ref KeyUserName
+          KEY_CREDENTIAL_ID: !Ref KeyCredentialId
+      Tags:
+        - Key: WorkshopResource
+          Value: graphrag-with-neo4j
+      Code:
+        ZipFile: |
+          """Deactivate the shared workshop Bedrock key when a spend alarm fires.
+
+          The alarm cannot call IAM, so it publishes to SNS and SNS invokes this
+          function. The one write it performs is scoped by the execution role to
+          iam:UpdateServiceSpecificCredential on one user, and the credential id
+          comes from the environment rather than from the event, so a malformed
+          or spoofed SNS message cannot redirect it at another credential.
+
+          Nothing here catches the IAM error. A failed deactivation must surface
+          as a Lambda error so SNS retries it and the failure is visible in the
+          function's metrics. Swallowing it would report a stop that never
+          happened, which is the one failure mode this control cannot have.
+          """
+
+          import json
+          import logging
+          import os
+
+          import boto3
+
+          LOG = logging.getLogger()
+          LOG.setLevel(logging.INFO)
+
+          USER_NAME = os.environ["KEY_USER_NAME"]
+          CREDENTIAL_ID = os.environ["KEY_CREDENTIAL_ID"]
+
+          _iam = boto3.client("iam")
+
+
+          def alarm_name(record: dict) -> str:
+              """Return the alarm name carried in one SNS record."""
+              try:
+                  message = json.loads(record["Sns"]["Message"])
+              except (KeyError, TypeError, ValueError):
+                  return "unparsed-sns-record"
+              return message.get("AlarmName", "unnamed-alarm")
+
+
+          def handler(event: dict, context: object) -> dict:
+              """Set the shared Bedrock credential to Inactive."""
+              names = [alarm_name(r) for r in event.get("Records", [])]
+              LOG.info("tripped by: %s", ", ".join(names) or "no SNS record")
+              _iam.update_service_specific_credential(
+                  UserName=USER_NAME,
+                  ServiceSpecificCredentialId=CREDENTIAL_ID,
+                  Status="Inactive",
+              )
+              LOG.warning(
+                  "deactivated credential %s on user %s", CREDENTIAL_ID, USER_NAME
+              )
+              return {
+                  "credentialId": CREDENTIAL_ID,
+                  "status": "Inactive",
+                  "alarms": names,
+              }
+
+  BreakerFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt BreakerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref BreakerTopic
+
+  # DependsOn the permission, so the topic can never hold a subscription it is
+  # not yet allowed to deliver to.
+  #
+  # The filter policy is what keeps BreakerFailureAlarm off this subscription.
+  # Four alarms publish to this topic and only three of them should reach the
+  # Lambda. Without the filter, the alarm that reports a broken breaker would
+  # invoke the breaker again. The email subscription managed by admin.py carries
+  # no filter, so the operator still receives all four.
+  #
+  # All names come from Ref against the alarm resources, so the filter cannot
+  # drift away from the alarms it names. Confirm it end to end with the
+  # set-alarm-state rehearsal in CONTROLS.md before class.
+  BreakerFunctionSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: BreakerFunctionInvokePermission
+    Properties:
+      TopicArn: !Ref BreakerTopic
+      Protocol: lambda
+      Endpoint: !GetAtt BreakerFunction.Arn
+      FilterPolicyScope: MessageBody
+      FilterPolicy:
+        AlarmName:
+          - !Ref BurstSpendAlarm
+          - !Ref SustainedSpendAlarm
+          - !Ref WorkshopTotalSpendAlarm
+
+  # -------------------------------------------------------------------------
+  # The three spend alarms evaluate the same price-weighted expression over one
+  # minute, fifteen minutes, or a rolling four hours. None has an OKAction.
+  # Bringing the key back must be a human decision, because an automatic
+  # recovery would restart the same runaway loop the breaker just stopped.
+  # -------------------------------------------------------------------------
+
+  BurstSpendAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-burst-spend"
+      AlarmDescription: >-
+        Estimated Bedrock spend across the three workshop models exceeded the
+        burst threshold in a single minute. The breaker Lambda has deactivated
+        the shared key. See bedrock-key/README.md.
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref BurstThresholdUsdPerMinute
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref BreakerTopic
+      Metrics:
+        - Id: chat_in
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref ChatModelId
+        - Id: chat_out
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: OutputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref ChatModelId
+        - Id: embed_in
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref EmbedModelId
+        - Id: memory_in
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref MemoryEmbedModelId
+        - Id: usd_per_minute
+          ReturnData: true
+          Label: Estimated USD per minute, workshop models
+          Expression: !Sub >-
+            (FILL(chat_in,0)*${ChatInputUsdPerMillion}
+            + FILL(chat_out,0)*${ChatOutputUsdPerMillion}
+            + FILL(embed_in,0)*${EmbedUsdPerMillion}
+            + FILL(memory_in,0)*${MemoryEmbedUsdPerMillion}) / 1000000
+
+  SustainedSpendAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-sustained-spend"
+      AlarmDescription: >-
+        Estimated Bedrock spend averaged above the sustained threshold for every
+        one of SustainedEvaluationPeriods consecutive five-minute periods. The
+        breaker Lambda has deactivated the shared key. See
+        bedrock-key/README.md.
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref SustainedThresholdUsdPerMinute
+      EvaluationPeriods: !Ref SustainedEvaluationPeriods
+      DatapointsToAlarm: !Ref SustainedEvaluationPeriods
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref BreakerTopic
+      Metrics:
+        - Id: chat_in
+          ReturnData: false
+          MetricStat:
+            Period: 300
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref ChatModelId
+        - Id: chat_out
+          ReturnData: false
+          MetricStat:
+            Period: 300
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: OutputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref ChatModelId
+        - Id: embed_in
+          ReturnData: false
+          MetricStat:
+            Period: 300
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref EmbedModelId
+        - Id: memory_in
+          ReturnData: false
+          MetricStat:
+            Period: 300
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref MemoryEmbedModelId
+        # Divided by five so a 300-second window reports the same unit the burst
+        # alarm reports. Both thresholds are then read as dollars per minute.
+        - Id: usd_per_minute
+          ReturnData: true
+          Label: Estimated USD per minute, five-minute average
+          Expression: !Sub >-
+            (FILL(chat_in,0)*${ChatInputUsdPerMillion}
+            + FILL(chat_out,0)*${ChatOutputUsdPerMillion}
+            + FILL(embed_in,0)*${EmbedUsdPerMillion}
+            + FILL(memory_in,0)*${MemoryEmbedUsdPerMillion}) / 5000000
+
+  WorkshopTotalSpendAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-workshop-total-spend"
+      AlarmDescription: >-
+        Estimated Bedrock spend across the workshop models exceeded the
+        configured total in the trailing four hours. The breaker Lambda has
+        deactivated the shared key. See bedrock-key/README.md.
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref WorkshopTotalUsd
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      # EvaluationWindow is omitted intentionally. CloudWatch's default is a
+      # sliding window; a wall-clock window could reset during the workshop.
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref BreakerTopic
+      Metrics:
+        - Id: chat_in
+          ReturnData: false
+          MetricStat:
+            Period: 14400
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref ChatModelId
+        - Id: chat_out
+          ReturnData: false
+          MetricStat:
+            Period: 14400
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: OutputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref ChatModelId
+        - Id: embed_in
+          ReturnData: false
+          MetricStat:
+            Period: 14400
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref EmbedModelId
+        - Id: memory_in
+          ReturnData: false
+          MetricStat:
+            Period: 14400
+            Stat: Sum
+            Metric:
+              Namespace: AWS/Bedrock
+              MetricName: InputTokenCount
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref MemoryEmbedModelId
+        - Id: rolling_usd
+          ReturnData: true
+          Label: Estimated USD, trailing four hours
+          Expression: !Sub >-
+            (FILL(chat_in,0)*${ChatInputUsdPerMillion}
+            + FILL(chat_out,0)*${ChatOutputUsdPerMillion}
+            + FILL(embed_in,0)*${EmbedUsdPerMillion}
+            + FILL(memory_in,0)*${MemoryEmbedUsdPerMillion}) / 1000000
+
+  # -------------------------------------------------------------------------
+  # Did the breaker actually work?
+  #
+  # The email subscription and the Lambda subscription are independent. A spend
+  # alarm mails the operator whether or not the Lambda's IAM call succeeded, so
+  # an operator reading only the email would believe the key is off while it is
+  # still live. This alarm closes that gap. Any Lambda error inside one minute
+  # produces a second mail, and that second mail means go and read the
+  # credential status by hand.
+  #
+  # It notifies and nothing else. There is no OKAction and no second action. It
+  # publishes to BreakerTopic so it reaches the same inbox with no second
+  # confirmation workflow to duplicate, and BreakerFunctionSubscription's filter
+  # policy names only the three spend alarms, so this alarm's message reaches the
+  # email and never the Lambda. A breaker that re-triggered itself on its own
+  # failure is the loop that filter exists to prevent.
+  # -------------------------------------------------------------------------
+
+  BreakerFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-breaker-failed"
+      AlarmDescription: >-
+        The breaker Lambda raised an error, so the shared key may still be
+        Active after a spend alarm fired. Read the credential status by hand and
+        stop it with uv run bedrock-key/admin.py stop if it is still Active.
+        See bedrock-key/CONTROLS.md.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BreakerFunction
+      Statistic: Sum
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      # A minute with no invocation publishes no datapoint. That is the normal
+      # state of this function and must never read as a failure.
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref BreakerTopic
+
+  # -------------------------------------------------------------------------
+  # The class-day view. README.md sends the operator here and nowhere else.
+  # -------------------------------------------------------------------------
+
+  SpendDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 24, "height": 8,
+              "properties": {
+                "title": "Estimated Bedrock spend, USD per minute",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 60,
+                "stat": "Sum",
+                "yAxis": { "left": { "min": 0, "showUnits": false, "label": "USD/min" } },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "label": "sustained trip, 15 min average",
+                      "value": ${SustainedThresholdUsdPerMinute},
+                      "color": "#ff7f0e"
+                    },
+                    {
+                      "label": "burst trip, 1 min",
+                      "value": ${BurstThresholdUsdPerMinute},
+                      "color": "#d62728"
+                    }
+                  ]
+                },
+                "metrics": [
+                  [ { "expression": "(FILL(m1,0)*${ChatInputUsdPerMillion} + FILL(m2,0)*${ChatOutputUsdPerMillion} + FILL(m3,0)*${EmbedUsdPerMillion} + FILL(m4,0)*${MemoryEmbedUsdPerMillion}) / 1000000", "label": "USD per minute", "id": "e1", "region": "${AWS::Region}", "color": "#1f77b4" } ],
+                  [ "AWS/Bedrock", "InputTokenCount", "ModelId", "${ChatModelId}", { "id": "m1", "visible": false } ],
+                  [ "AWS/Bedrock", "OutputTokenCount", "ModelId", "${ChatModelId}", { "id": "m2", "visible": false } ],
+                  [ "AWS/Bedrock", "InputTokenCount", "ModelId", "${EmbedModelId}", { "id": "m3", "visible": false } ],
+                  [ "AWS/Bedrock", "InputTokenCount", "ModelId", "${MemoryEmbedModelId}", { "id": "m4", "visible": false } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 8, "width": 12, "height": 7,
+              "properties": {
+                "title": "Tokens per minute by model",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 60,
+                "stat": "Sum",
+                "yAxis": { "left": { "min": 0, "showUnits": false, "label": "tokens/min" } },
+                "metrics": [
+                  [ "AWS/Bedrock", "InputTokenCount", "ModelId", "${ChatModelId}", { "label": "chat input" } ],
+                  [ "AWS/Bedrock", "OutputTokenCount", "ModelId", "${ChatModelId}", { "label": "chat output" } ],
+                  [ "AWS/Bedrock", "InputTokenCount", "ModelId", "${EmbedModelId}", { "label": "retrieval embeddings" } ],
+                  [ "AWS/Bedrock", "InputTokenCount", "ModelId", "${MemoryEmbedModelId}", { "label": "memory embeddings" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 8, "width": 12, "height": 7,
+              "properties": {
+                "title": "Calls, throttles, and client errors per minute",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 60,
+                "stat": "Sum",
+                "yAxis": { "left": { "min": 0, "showUnits": false, "label": "count/min" } },
+                "metrics": [
+                  [ "AWS/Bedrock", "Invocations", "ModelId", "${ChatModelId}", { "label": "chat calls" } ],
+                  [ "AWS/Bedrock", "Invocations", "ModelId", "${EmbedModelId}", { "label": "retrieval embed calls" } ],
+                  [ "AWS/Bedrock", "Invocations", "ModelId", "${MemoryEmbedModelId}", { "label": "memory embed calls" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "${ChatModelId}", { "label": "chat throttles", "color": "#ff7f0e" } ],
+                  [ "AWS/Bedrock", "InvocationClientErrors", "ModelId", "${ChatModelId}", { "label": "chat client errors", "color": "#d62728" } ]
+                ]
+              }
+            }
+          ]
+        }
+
+  # -------------------------------------------------------------------------
+  # Model invocation logging.
+  #
+  # Invocation logging records the request and response bodies verbatim, which
+  # means this group holds the prompts students typed and the completions the
+  # model returned. Treat it as student-authored text. Retention is set from
+  # InvocationLogRetentionDays and defaults to 14 days, which covers a postmortem
+  # in the week after class and keeps nothing beyond that.
+  #
+  # Only text delivery is enabled. Embedding delivery would write every embedded
+  # chunk from forty students into this group for no diagnostic value, and image
+  # and video are modalities this workshop never sends.
+  #
+  # No largeDataDeliveryS3Config is configured, so a request or response body
+  # over 100 KB is not delivered. That is acceptable here, because the purpose is
+  # to identify which prompt shape ran away, not to keep a complete archive.
+  #
+  # This does not give per-student attribution. Every log record's identity.arn
+  # is the one shared key user, because every student sends the same bearer
+  # token. The prompt text is what tells you which module or which loop ran away.
+  # -------------------------------------------------------------------------
+
+  InvocationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Ref InvocationLogGroupName
+      RetentionInDays: !Ref InvocationLogRetentionDays
+      Tags:
+        - Key: WorkshopResource
+          Value: graphrag-with-neo4j
+        - Key: Contains
+          Value: student-authored-text
+
+  InvocationLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Role Bedrock assumes to write model invocation logs.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: write-invocation-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Built from its parts rather than from the log group's Arn
+              # attribute. That attribute ends in ":*", so appending
+              # ":log-stream:..." to it yields an ARN that matches no stream,
+              # and PutModelInvocationLoggingConfiguration rejects the role.
+              # The form below is the one the Bedrock user guide specifies.
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${InvocationLogGroup}:log-stream:aws/bedrock/modelinvocations"
+      Tags:
+        - Key: WorkshopResource
+          Value: graphrag-with-neo4j
+
+  # -------------------------------------------------------------------------
+  # The backstop budget.
+  #
+  # A budget alert is not a stop. It sends mail. Cost data refreshes on the order
+  # of every eight to twelve hours, so this control will not fire during a
+  # four-hour class and is not meant to. It is the line that catches what the
+  # breaker missed, read the morning after.
+  #
+  # Notifications go to email only, never to the breaker topic. Wiring stale cost
+  # data to an automatic deactivation would let yesterday's spend switch off
+  # today's class.
+  #
+  # The filter names two Cost Explorer service values and covers the whole
+  # account, so unrelated work under either value counts toward it. Read the
+  # account's month-to-date spend under those two values before class and treat
+  # the class allowance as an increment on that baseline.
+  # -------------------------------------------------------------------------
+
+  BackstopBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${AWS::StackName}-bedrock-backstop"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        CostFilters:
+          Service: !Ref BudgetServiceFilters
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            ThresholdType: PERCENTAGE
+            Threshold: 50
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            ThresholdType: PERCENTAGE
+            Threshold: 80
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            ThresholdType: PERCENTAGE
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            ThresholdType: PERCENTAGE
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+Outputs:
+
+  BreakerTopicArn:
+    Description: Alarm action target.
+    Value: !Ref BreakerTopic
+
+  BreakerFunctionName:
+    Description: Lambda that deactivates the credential.
+    Value: !Ref BreakerFunction
+
+  BurstAlarmName:
+    Description: One-minute breaker alarm.
+    Value: !Ref BurstSpendAlarm
+
+  SustainedAlarmName:
+    Description: Slow-burn breaker alarm.
+    Value: !Ref SustainedSpendAlarm
+
+  WorkshopTotalAlarmName:
+    Description: Rolling four-hour total-spend breaker alarm.
+    Value: !Ref WorkshopTotalSpendAlarm
+
+  BreakerFailureAlarmName:
+    Description: >-
+      Fires when the breaker Lambda itself errors. Mails the operator and takes
+      no other action.
+    Value: !Ref BreakerFailureAlarm
+
+  InvocationLogGroupName:
+    Description: Log group that will hold prompts and completions.
+    Value: !Ref InvocationLogGroup
+
+  InvocationLogRoleArn:
+    Description: >-
+      Role ARN that admin.py passes to
+      bedrock put-model-invocation-logging-configuration.
+    Value: !GetAtt InvocationLogRole.Arn
+
+  DashboardUrl:
+    Description: The class-day view.
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/${AWS::StackName}"

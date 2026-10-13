@@ -1,0 +1,29 @@
+{
+  "stacks": [
+    "${LAB_STACK_NAME}"
+  ],
+  "outputs": [
+    "BucketName",
+    "BucketArn",
+    "BucketRegionalDomainName",
+    "LogGroupArn",
+    "ParameterName",
+    "SweepRoleArn",
+    "SweepFunctionArn",
+    "SweepDeletedOnCreate",
+    "SweepReportOnCreate",
+    "SweepLogGroup"
+  ],
+  "buckets": [
+    "${output:BucketName}"
+  ],
+  "parameters": [
+    "${output:ParameterName}"
+  ],
+  "log_groups": [
+    "/vocareum-lab/${LAB_STACK_NAME}"
+  ],
+  "functions": [
+    "${output:SweepFunctionArn}"
+  ]
+}

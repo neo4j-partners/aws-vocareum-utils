@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "course_key": "neo4j-fundamentals",
+  "assets": {
+    "template": "lab.template",
+    "manifest": "expected.json",
+    "notebook": "notebooks/lab-01-verify-environment.ipynb"
+  },
+  "vocareum": {
+    "course_name": "Neo4j + AWS  Environment Validation",
+    "assignment_name": "GraphRAG Search",
+    "part_name": "Part 1",
+    "lab_type": "Vocareum Notebook",
+    "session_length": "240",
+    "cloud_labs": true,
+    "budget": {
+      "total_dollar": "200",
+      "monthly_dollar": "100",
+      "total_time": "0",
+      "monthly_time": "0"
+    }
+  },
+  "cleanup": {
+    "resource_prefixes": [
+      "verify",
+      "wsverify",
+      "workshop-",
+      "bedrock-agentcore-verify",
+      "hotel-booking-verify",
+      "agentcoreprobe",
+      "phase3probe"
+    ],
+    "iam_role_prefixes": [
+      "workshop-",
+      "AmazonBedrockAgentCoreSDK",
+      "agentcoreprobe",
+      "phase3probe"
+    ],
+    "s3_bucket_prefixes": [
+      "bedrock-agentcore-codebuild-sources"
+    ]
+  }
+}

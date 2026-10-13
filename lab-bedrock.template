@@ -1,0 +1,569 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Vocareum AWS lab Bedrock reachability probe. Answers one question: can this
+  student account call an Amazon Bedrock foundation model, and if not,
+  exactly why. It creates nothing persistent.
+
+  A Lambda-backed custom resource runs four probes at create time and CATCHES
+  every error, so the stack reaches CREATE_COMPLETE and reports the diagnosis
+  as Outputs. A generic AccessDenied rollback tells you nothing, which is the
+  situation this template exists to escape. Read the Verdict, NextAction and
+  Reason outputs first.
+
+  Deploy by uploading this file to /voc/private/lab.template in Configure
+  Workspace. The filename must be exactly lab.template, so keep the real
+  lab.template elsewhere while this probe is in place.
+
+# The four probes, in order:
+#   1. sts:GetCallerIdentity          Which principal was actually tested.
+#   2. bedrock:ListFoundationModels   Control plane. Is Bedrock reachable at
+#      all. Needs no per-account model access grant, so it cleanly separates
+#      "Bedrock is blocked" from "this model is not invokable".
+#   3. Converse via the US geographic inference profile. The normal path.
+#   4. Converse via the bare in-Region model ID, only if probe 3 failed. That
+#      path does no cross-Region routing, so a pass here after a failure at 3
+#      points at a Region-scoped org policy rather than at Bedrock itself.
+#
+# Assumptions and known blind spots:
+#   - The probe runs as the Lambda execution role, NOT as the student's
+#     vocareum/sysNNNNNNN role. Service control policies apply to every
+#     principal in the account, so an SCP_DENY verdict is conclusive for the
+#     student too. A pass is NOT conclusive: it proves the org ceiling allows
+#     Bedrock, not that the student's own role holds the IAM permission. That
+#     second question is answered by lab.policy.
+#   - Creating the Lambda function and its IAM role is itself unverified
+#     against the ceiling. If the stack fails on ProbeFunctionRole or
+#     ProbeFunction, the ceiling blocks IAM or Lambda and the Bedrock question
+#     is still unanswered. Set ExecutionRoleArn to an existing role to drop
+#     the iam:CreateRole dependency, then try again.
+#   - No AWS::Logs::LogGroup is declared on purpose. Lambda creates its log
+#     group lazily, so a logs deny costs you the logs but still returns the
+#     verdict. Declaring the group would let a logs deny fail the whole stack.
+
+Parameters:
+  ModelId:
+    Type: String
+    Default: anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: >-
+      Bare foundation model ID for Claude Haiku 4.5, used by the in-Region
+      fallback probe. Confirmed against the Bedrock model card at
+      docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html
+      Haiku is the cheapest current Anthropic model on Bedrock and the probe
+      caps output at 8 tokens, so a full run costs a fraction of a cent
+      against the $100 per month student budget.
+
+  InferenceProfileId:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: >-
+      US geographic cross-Region inference profile ID for the same model.
+      This is the primary probe target. Claude Haiku 4.5 supports In-Region
+      invocation in us-east-1 but NOT in us-west-2, so the bare model ID
+      alone would raise a ValidationException in us-west-2 that looks like a
+      permissions failure. The us. profile works from both AgentCore regions.
+
+  ExecutionRoleArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional ARN of an existing role for the probe function to assume.
+      Leave empty and the template creates a least-privilege role. Set it to
+      an existing role, for example the LabRole that Vocareum-hosted accounts
+      commonly provide, if the ceiling denies iam:CreateRole. The role must
+      trust lambda.amazonaws.com.
+
+Conditions:
+  # Only build an IAM role when the caller did not supply one. This is the
+  # single knob that lets the probe be retried without iam:CreateRole.
+  CreateExecutionRole: !Equals [!Ref ExecutionRoleArn, ""]
+
+Resources:
+  ProbeFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRole
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: bedrock-probe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Control plane probe. bedrock:ListFoundationModels is a
+              # Region-wide list operation and does not support
+              # resource-level permissions, so "*" is the only valid value.
+              # It reads model metadata only and grants no inference.
+              - Sid: ListModelsControlPlane
+                Effect: Allow
+                Action: bedrock:ListFoundationModels
+                Resource: "*"
+
+              # Primary invoke probe. Scoped to the one inference profile
+              # this template names, in this Region and account only.
+              - Sid: InvokeViaInferenceProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${InferenceProfileId}
+
+              # A geographic inference profile also needs the foundation
+              # model itself allowed in every destination Region it routes
+              # to. The Region wildcard is bounded two ways: to this one
+              # model, and by the InferenceProfileArn condition to requests
+              # arriving through the profile above. That is tighter than
+              # hardcoding the destination list and stays correct if AWS adds
+              # a destination Region to the US profile.
+              - Sid: InvokeModelBehindThatProfile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:*::foundation-model/${ModelId}
+                Condition:
+                  ArnEquals:
+                    bedrock:InferenceProfileArn: !Sub >-
+                      arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${InferenceProfileId}
+
+              # Fallback probe. The bare model ID in this Region only, with
+              # no inference profile involved, so it can still be reached
+              # when cross-Region routing is what is blocked.
+              - Sid: InvokeModelInRegionDirect
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${ModelId}
+
+              # CloudWatch Logs, so a truncated Output can be chased in the
+              # log stream. The function name is generated by CloudFormation
+              # and is unknowable at authoring time, so the group name is
+              # wildcarded within this account's Lambda log groups.
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+      Tags:
+        - Key: Purpose
+          Value: vocareum-bedrock-probe
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  ProbeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      # No FunctionName is set, so CloudFormation generates one. A fixed name
+      # would collide if a previous lab session failed to delete its stack,
+      # and Vocareum resets labs often.
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !If
+        - CreateExecutionRole
+        - !GetAtt ProbeFunctionRole.Arn
+        - !Ref ExecutionRoleArn
+      # 60s is well clear of four short API calls. A Lambda that times out
+      # sends no response at all and leaves the stack hanging for an hour.
+      Timeout: 60
+      MemorySize: 256
+      # Inline ZipFile only. The Vocareum flow has no build or upload step,
+      # so an S3 artifact could never be staged.
+      Code:
+        ZipFile: |
+          """Probe Amazon Bedrock from inside the student account.
+
+          Every probe is caught and classified. The handler always reports
+          SUCCESS to CloudFormation and puts the diagnosis in the response
+          data, so the stack completes and the verdict is readable as a
+          stack Output instead of a rollback message.
+          """
+
+          import json
+          from typing import Any
+
+          import boto3
+          import cfnresponse
+          from botocore.config import Config
+          from botocore.exceptions import BotoCoreError, ClientError
+
+          # Short timeouts and few retries. The stack must never wait on a
+          # hung socket, because a Lambda timeout means no response is sent
+          # and CloudFormation sits in CREATE_IN_PROGRESS for an hour.
+          BOTO_CONFIG = Config(
+              connect_timeout=5,
+              read_timeout=20,
+              retries={"max_attempts": 2, "mode": "standard"},
+          )
+
+          # A custom resource response body is capped at 4096 bytes in
+          # total, so every field is truncated before it goes in.
+          MAX_DETAIL = 250
+          MAX_REASON = 600
+
+          PROMPT = "Reply with the single word ok."
+
+          NEXT_ACTION = {
+              "SCP_DENY": (
+                  "A service control policy in Vocareum's AWS Organization "
+                  "blocks this. Nothing in lab.template or lab.policy can "
+                  "raise it. Send Vocareum support the policy ID printed in "
+                  "the Reason output."
+              ),
+              "RCP_DENY": (
+                  "A resource control policy in the Organization blocks "
+                  "this. Same escalation path as an SCP: only Vocareum can "
+                  "change it."
+              ),
+              "IAM_DENY": (
+                  "The calling role lacks the action. This is fixable "
+                  "inside the account, in lab.policy or in the probe role. "
+                  "No Vocareum involvement needed."
+              ),
+              "MODEL_ACCESS_NOT_GRANTED": (
+                  "Bedrock is reachable but model access was never granted "
+                  "for this model in this Region. Grant it on the Model "
+                  "access page of the Bedrock console. This is an account "
+                  "setting, not a policy problem."
+              ),
+              "MODEL_LEGACY_INACTIVE": (
+                  "Authorization passed, but the provider marked this model "
+                  "legacy and this account did not use it during the activity "
+                  "window. Choose an active model from ListFoundationModels."
+              ),
+              "MODEL_USE_CASE_NOT_SUBMITTED": (
+                  "Authorization passed, but Anthropic use-case details are "
+                  "not active for this account or destination Region. Submit "
+                  "the provider form and retry after it propagates."
+              ),
+              "MODEL_ID_INVALID": (
+                  "The model ID or inference profile ID is not valid for "
+                  "this Region. This is a template value problem, not a "
+                  "permissions problem. Check the model card."
+              ),
+              "MODEL_NOT_IN_REGION": (
+                  "The model is not offered in this Region. Use the us. "
+                  "inference profile or move the lab to us-east-1."
+              ),
+              "REACHABLE_THROTTLED": (
+                  "The call was authorized and then throttled, so access "
+                  "works. Retry, or raise the account quota."
+              ),
+              "REACHABLE_QUOTA": (
+                  "The call was authorized and then hit a service quota, "
+                  "so access works. Request a quota increase."
+              ),
+              "ENDPOINT_UNREACHABLE": (
+                  "The Bedrock endpoint could not be reached from Lambda. "
+                  "Suspect a network or endpoint problem, not a policy."
+              ),
+              "OK": "No action needed.",
+          }
+
+
+          def _clip(text: str, limit: int) -> str:
+              """Trim text to limit characters, marking any truncation."""
+              text = " ".join(str(text).split())
+              if len(text) <= limit:
+                  return text
+              return text[: limit - 3] + "..."
+
+
+          def classify(error: ClientError) -> tuple[str, str]:
+              """Map a botocore ClientError onto a verdict and a message."""
+              info = error.response.get("Error", {})
+              code = info.get("Code", "Unknown")
+              message = info.get("Message", str(error))
+              lowered = message.lower()
+
+              if code == "AccessDeniedException":
+                  # AWS names the blocking policy type in the message body.
+                  # That string is the only reliable way to tell an
+                  # org-level ceiling apart from a gap in the account's own
+                  # IAM, and both arrive as AccessDeniedException.
+                  if "service control policy" in lowered:
+                      return "SCP_DENY", message
+                  if "resource control policy" in lowered:
+                      return "RCP_DENY", message
+                  # This exact phrase is IAM's authorization failure. It
+                  # never appears in Bedrock's model-access wording, so
+                  # testing it before the model-access phrase is safe.
+                  if "not authorized to perform" in lowered:
+                      return "IAM_DENY", message
+                  # Bedrock's wording when the model exists and the caller
+                  # is authorized, but access was never granted for this
+                  # account in this Region.
+                  if "access to the model" in lowered:
+                      return "MODEL_ACCESS_NOT_GRANTED", message
+                  return "ACCESS_DENIED_UNCLASSIFIED", message
+
+              if code == "ResourceNotFoundException" and (
+                  "marked by provider as legacy" in lowered
+                  or ("legacy" in lowered and "last 30 days" in lowered)
+              ):
+                  return "MODEL_LEGACY_INACTIVE", message
+              if (
+                  code == "ResourceNotFoundException"
+                  and "use case details" in lowered
+              ):
+                  return "MODEL_USE_CASE_NOT_SUBMITTED", message
+
+              mapped = {
+                  "ValidationException": "MODEL_ID_INVALID",
+                  "ResourceNotFoundException": "MODEL_NOT_IN_REGION",
+                  "ThrottlingException": "REACHABLE_THROTTLED",
+                  "ServiceQuotaExceededException": "REACHABLE_QUOTA",
+                  "UnrecognizedClientException": "CREDENTIALS_BROKEN",
+                  "InvalidSignatureException": "CREDENTIALS_BROKEN",
+              }
+              return mapped.get(code, code.upper()), message
+
+
+          def probe_identity(region: str) -> dict[str, str]:
+              """Report which principal the probes actually run as."""
+              client = boto3.client("sts", region_name=region,
+                                    config=BOTO_CONFIG)
+              try:
+                  who = client.get_caller_identity()
+              except ClientError as error:
+                  status, message = classify(error)
+                  return {"status": status, "detail": message}
+              except BotoCoreError as error:
+                  return {"status": "ENDPOINT_UNREACHABLE",
+                          "detail": str(error)}
+              return {"status": "OK", "detail": who["Arn"]}
+
+
+          def probe_list_models(region: str) -> dict[str, str]:
+              """Call the Bedrock control plane. No model grant required."""
+              client = boto3.client("bedrock", region_name=region,
+                                    config=BOTO_CONFIG)
+              try:
+                  models = client.list_foundation_models(
+                      byProvider="anthropic"
+                  )["modelSummaries"]
+              except ClientError as error:
+                  status, message = classify(error)
+                  return {"status": status, "detail": message}
+              except BotoCoreError as error:
+                  return {"status": "ENDPOINT_UNREACHABLE",
+                          "detail": str(error)}
+              return {
+                  "status": "OK",
+                  "detail": (
+                      f"{len(models)} Anthropic models visible in {region}"
+                  ),
+              }
+
+
+          def probe_invoke(region: str, model_ref: str) -> dict[str, str]:
+              """Invoke a model through Converse and report the outcome.
+
+              Converse maps to the same bedrock:InvokeModel IAM action as
+              InvokeModel but needs no anthropic_version in the body, which
+              removes a way to raise a ValidationException that would look
+              like a permissions failure.
+              """
+              client = boto3.client("bedrock-runtime", region_name=region,
+                                    config=BOTO_CONFIG)
+              try:
+                  response = client.converse(
+                      modelId=model_ref,
+                      messages=[
+                          {"role": "user",
+                           "content": [{"text": PROMPT}]}
+                      ],
+                      inferenceConfig={"maxTokens": 8, "temperature": 0},
+                  )
+              except ClientError as error:
+                  status, message = classify(error)
+                  return {"status": status, "detail": message}
+              except BotoCoreError as error:
+                  return {"status": "ENDPOINT_UNREACHABLE",
+                          "detail": str(error)}
+
+              usage = response.get("usage", {})
+              return {
+                  "status": "OK",
+                  "detail": (
+                      f"{model_ref} answered, "
+                      f"{usage.get('totalTokens', 0)} tokens"
+                  ),
+              }
+
+
+          def run_probes(
+              region: str, model_id: str, profile_id: str
+          ) -> dict[str, str]:
+              """Run every probe and fold the results into one verdict."""
+              identity = probe_identity(region)
+              control = probe_list_models(region)
+              profile = probe_invoke(region, profile_id)
+
+              # Only pay for the second invoke when the first one failed.
+              # The bare model ID does no cross-Region routing, so a pass
+              # here after a profile failure isolates a Region-scoped org
+              # policy rather than Bedrock being blocked outright.
+              if profile["status"] == "OK":
+                  direct = {
+                      "status": "SKIPPED",
+                      "detail": "Inference profile already worked.",
+                  }
+              else:
+                  direct = probe_invoke(region, model_id)
+
+              if profile["status"] == "OK":
+                  verdict, cause = "BEDROCK_OK", profile
+              elif direct["status"] == "OK":
+                  verdict, cause = "BEDROCK_OK_IN_REGION_ONLY", profile
+              elif control["status"] == "OK":
+                  verdict, cause = "BEDROCK_REACHABLE_MODEL_BLOCKED", profile
+              else:
+                  verdict, cause = "BEDROCK_BLOCKED", control
+
+              action = NEXT_ACTION.get(
+                  cause["status"],
+                  "Unclassified failure. Read the Reason output and the "
+                  "function log stream.",
+              )
+              if verdict == "BEDROCK_OK_IN_REGION_ONLY":
+                  action = (
+                      "The bare model ID works but the US inference profile "
+                      "does not, so cross-Region routing is what is "
+                      "blocked. Check for a Region-restricting SCP: the US "
+                      "profile routes to us-east-1, us-east-2 and "
+                      "us-west-2, and blocking any one of them breaks it."
+                  )
+
+              return {
+                  "Verdict": verdict,
+                  "Reason": _clip(cause["detail"], MAX_REASON),
+                  "NextAction": _clip(action, MAX_REASON),
+                  "ProbedPrincipal": _clip(identity["detail"], MAX_DETAIL),
+                  "ControlPlaneStatus": control["status"],
+                  "ControlPlaneDetail": _clip(control["detail"], MAX_DETAIL),
+                  "InferenceProfileStatus": profile["status"],
+                  "InferenceProfileDetail": _clip(profile["detail"],
+                                                  MAX_DETAIL),
+                  "DirectModelStatus": direct["status"],
+                  "DirectModelDetail": _clip(direct["detail"], MAX_DETAIL),
+              }
+
+
+          def handler(event: dict[str, Any], context: Any) -> None:
+              """Run the probes and always answer CloudFormation."""
+              print(json.dumps({"RequestType": event.get("RequestType")}))
+              data: dict[str, str] = {}
+              try:
+                  if event.get("RequestType") == "Delete":
+                      cfnresponse.send(
+                          event, context, cfnresponse.SUCCESS, {},
+                          physicalResourceId="bedrock-probe",
+                      )
+                      return
+                  props = event.get("ResourceProperties", {})
+                  data = run_probes(
+                      region=props["Region"],
+                      model_id=props["ModelId"],
+                      profile_id=props["InferenceProfileId"],
+                  )
+                  print(json.dumps(data))
+              except Exception as error:  # noqa: BLE001
+                  # Deliberate catch-all, and the one place a broad except
+                  # is correct here. Anything escaping this frame would
+                  # leave CloudFormation waiting an hour for a response
+                  # that never arrives, which is the exact failure mode
+                  # this template exists to avoid.
+                  data = {
+                      "Verdict": "PROBE_ERROR",
+                      "Reason": _clip(
+                          f"{type(error).__name__}: {error}", MAX_REASON
+                      ),
+                      "NextAction": (
+                          "The probe itself failed before it could reach "
+                          "Bedrock. Read the function log stream."
+                      ),
+                  }
+              cfnresponse.send(
+                  event, context, cfnresponse.SUCCESS, data,
+                  physicalResourceId="bedrock-probe",
+              )
+      Tags:
+        - Key: Purpose
+          Value: vocareum-bedrock-probe
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  BedrockProbe:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ProbeFunction.Arn
+      # Passed as properties rather than read from the environment so that a
+      # stack update with a different model ID re-runs the probe.
+      Region: !Ref AWS::Region
+      ModelId: !Ref ModelId
+      InferenceProfileId: !Ref InferenceProfileId
+
+Outputs:
+  Verdict:
+    Description: >-
+      One of BEDROCK_OK, BEDROCK_OK_IN_REGION_ONLY,
+      BEDROCK_REACHABLE_MODEL_BLOCKED, BEDROCK_BLOCKED, PROBE_ERROR
+    Value: !GetAtt BedrockProbe.Verdict
+
+  NextAction:
+    Description: What to do about the verdict, and who has to do it
+    Value: !GetAtt BedrockProbe.NextAction
+
+  Reason:
+    Description: >-
+      Raw AWS error message behind the verdict. An SCP deny names the
+      offending policy ID here, which is what Vocareum support will ask for.
+    Value: !GetAtt BedrockProbe.Reason
+
+  ControlPlaneStatus:
+    Description: >-
+      bedrock:ListFoundationModels result. OK means Bedrock is reachable in
+      this account and Region regardless of any model access grant.
+    Value: !GetAtt BedrockProbe.ControlPlaneStatus
+
+  ControlPlaneDetail:
+    Description: Count of visible Anthropic models, or the error message
+    Value: !GetAtt BedrockProbe.ControlPlaneDetail
+
+  InferenceProfileStatus:
+    Description: >-
+      Converse result through the US geographic inference profile, the
+      InferenceProfileId parameter. This is the primary probe.
+    Value: !GetAtt BedrockProbe.InferenceProfileStatus
+
+  InferenceProfileDetail:
+    Description: Token usage on success, or the classified error
+    Value: !GetAtt BedrockProbe.InferenceProfileDetail
+
+  DirectModelStatus:
+    Description: >-
+      Converse result through the bare in-Region model ID. SKIPPED when the
+      inference profile already worked.
+    Value: !GetAtt BedrockProbe.DirectModelStatus
+
+  DirectModelDetail:
+    Description: Token usage on success, or the classified error
+    Value: !GetAtt BedrockProbe.DirectModelDetail
+
+  ProbedPrincipal:
+    Description: >-
+      The role the probes ran as. This is the Lambda execution role, not the
+      student's vocareum role. An SCP deny applies to every principal in the
+      account and is conclusive. A pass proves the org ceiling allows
+      Bedrock, not that the student's own role is permitted.
+    Value: !GetAtt BedrockProbe.ProbedPrincipal
+
+  LogsLink:
+    Description: CloudWatch log group for the probe function
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#logsV2:log-groups/log-group/$252Faws$252Flambda$252F${ProbeFunction}

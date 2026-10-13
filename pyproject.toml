@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vocareum-tools"
+version = "0.1.0"
+description = "Operational tools for Vocareum-hosted AWS labs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.34",
+    # Imported directly for its exception types and Config, not just pulled in
+    # behind boto3, so it is declared rather than relied on transitively.
+    "botocore>=1.34",
+]
+
+[tool.hatch.build.targets.wheel]
+# Two packages, not one. `workshop_lab` is the notebook's utility code and is
+# the source of truth for the copy published to the public workshop repository
+# by scripts/sync_workshop_lab.py. It lives here so the offline test suite can
+# import and drive it; hatchling would otherwise only find the package matching
+# the project name.
+packages = ["src/vocareum_tools", "src/workshop_lab"]
+
+[project.scripts]
+vocareum-diagnose = "vocareum_tools.diagnose:main"
+vocareum-course-setup = "vocareum_tools.course_setup:main"
+vocareum-end-all = "vocareum_tools.endall:main"
+vocareum-end-lab = "vocareum_tools.endlab:main"
+vocareum-expect = "vocareum_tools.expect:main"
+vocareum-probe = "vocareum_tools.probe:main"
+vocareum-refresh = "vocareum_tools.refresh:main"
+vocareum-report-spend = "vocareum_tools.report_spend:main"
+vocareum-restart-student = "vocareum_tools.restart_student:main"
+vocareum-release = "vocareum_tools.release:main"
+vocareum-scan-pool = "vocareum_tools.poolscan:main"
+vocareum-package-startercode = "vocareum_tools.startercode:main"
+vocareum-sweep = "vocareum_tools.sweep:main"
+vocareum-upload = "vocareum_tools.upload:main"
+
+[dependency-groups]
+dev = [
+    "cfn-lint>=1.48.1",
+    "pytest>=8",
+    "ruff>=0.12",
+    # scripts/simulate_lab_policy.py declares its own dependencies inline, so it
+    # runs standalone under `uv run`. PyYAML is repeated here because the
+    # offline test that drives its lab.template parser imports the script into
+    # the dev environment, where an inline declaration does not reach.
+    "pyyaml>=6",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests/management"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+# The notebook is excluded because its cells reference names defined in earlier
+# cells, so every one of them reads as undefined.
+extend-exclude = ["notebooks/*.ipynb"]
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "ISC", "PIE", "RUF", "SIM", "UP"]
+ignore = ["ISC001"]

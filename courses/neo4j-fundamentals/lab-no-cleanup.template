@@ -1,0 +1,569 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Vocareum AWS lab environment. Creates the three free-at-rest smoke-test
+  resources (S3 bucket, SSM Parameter Store entry, CloudWatch Logs log group)
+  that prove Vocareum runs lab.template per student, plus every IAM::RolePolicy
+  grant the workshop's session role needs: Bedrock, AgentCore, ECR, DynamoDB,
+  Lambda, IAM role management, S3, CloudWatch Logs, and the CodeBuild/EC2-
+  describe/Secrets-Manager/Marketplace/STS statement. See the comment
+  immediately below for why these grants live here instead of in a separate
+  lab.policy file.
+
+  This diagnostic variant deliberately omits the Lambda-backed account sweep.
+  It retains the normal CloudFormation deletion behavior for the three
+  smoke-test resources and every permission grant for the voclabs session role.
+
+  Deploy by uploading this file to /voc/private/lab.template in Configure
+  Workspace. The filename must be exactly lab.template.
+
+# Why every permission grant lives in this one file, not in a separate
+# lab.policy. lab.policy, standard IAM policy JSON that Vocareum merges into
+# the student session role at session start, was the first design tried. A
+# live test on 2026-08-04 found that several of its statements were not in
+# effect on the session role: Bedrock, AgentCore, ECR-write, and Secrets
+# Manager calls came back Denied even though the file granted them, several
+# with an unscoped Resource: "*", which rules out a resource-pattern typo.
+#
+# The same statements, delivered instead as AWS::IAM::RolePolicy resources
+# in this template, applied correctly on the next live test: CloudFormation
+# attaches them to the voclabs role using the deployer role's own
+# credentials. Once that was confirmed, there was no reason to keep two
+# descriptions of the same grants, so every statement lab.policy used to
+# carry was folded in here and lab.policy was retired. docs/deploying.md's
+# lab.policy section has the details.
+#
+# The workshop still provisions everything else itself, at runtime, with this
+# same session role: its own S3 buckets, its own ECR repos, its own IAM
+# roles, its own AgentCore gateways and memories, via boto3 scripts the
+# student runs from inside the notebook.
+# sample-stop-ai-agent-hallucinations-workshop/setup/provision_agentcore.py
+# is one example; the core numbered notebooks provision the same way inline.
+# This template only grants the permissions those scripts need; it does not
+# pre-create the resources themselves, which would just be a second,
+# redundant path to something the notebooks already make and clean up on
+# their own. Neo4j runs on Aura, external to AWS (docs/neo4j-aura.md), so
+# nothing about it belongs here either.
+#
+# The one real gap left, Anthropic model access
+# (bedrock:PutUseCaseForModelAccess and the session policy listing the
+# current model IDs), is an account-level Vocareum setting. No
+# CloudFormation resource in this account can grant it, so it is tracked
+# as an open ask in simplified-perm.md instead of being worked around here.
+#
+# Do not restate a permission result here: this comment went stale within
+# hours the last time it carried one. Every resource below is measured as
+# permitted.
+#
+# Design notes:
+#   - The three resources are deliberately independent of each other. No resource
+#     references another, so CloudFormation creates them in parallel and the stack
+#     events report a separate CREATE_COMPLETE or CREATE_FAILED for each one. A
+#     failure therefore still tells us which of the three services the SCP allows,
+#     instead of collapsing into a single unusable data point.
+#   - No IAM role or instance profile is created. The IAM::RolePolicy resources
+#     attach grants to the existing voclabs session role. See the comment on
+#     LabParameter for why the three smoke-test resources avoid creating IAM
+#     resources of their own.
+#   - No compute, no NAT, no VPC endpoints, no KMS customer managed key. Every
+#     resource here is free at rest, which matters against the $100 per month and
+#     $200 total per student budgets.
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: vocareum-lab
+    AllowedPattern: "[a-z0-9][a-z0-9-]{1,20}[a-z0-9]"
+    Description: >-
+      Lowercase prefix applied to the bucket name and to the tag values. Kept
+      lowercase and short because S3 bucket names must be lowercase and are
+      capped at 63 characters. Vocareum passes no parameter values, so the
+      default has to be the working value.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+    Description: >-
+      Retention on the lab log group. A retention period is always set so the
+      group cannot accumulate cost indefinitely if a later phase writes to it.
+      The list is kept short so the value cannot be raised to a year if it is
+      ever overridden.
+
+Resources:
+  # S3 bucket. Chosen because it is the most visible proof in the console and
+  # because GetAtt on a bucket returns values that only exist once the bucket is
+  # really created. The bucket is left empty by this template, so a plain Delete
+  # policy always succeeds. Retain is deliberately not used, because a retained
+  # bucket outlives the lab session and leaves the student with an orphan they
+  # cannot see or remove.
+  LabBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      # Bucket names are a single global namespace and Vocareum starts many
+      # student stacks at once, so the name is derived entirely from intrinsics.
+      # The account ID separates students from each other. The trailing 12 hex
+      # characters are the last group of the stack GUID, which separates one lab
+      # start from the next in the same account, so restarting the lab cannot
+      # collide with a bucket left behind by an earlier run. Worst case length is
+      # 21 + 1 + 12 + 1 + 12 = 47 characters, inside the 63 character limit.
+      BucketName: !Sub
+        - "${ResourcePrefix}-${AWS::AccountId}-${StackSuffix}"
+        - StackSuffix: !Select [4, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+      # Buckets are private and encrypted with SSE-S3 by default. Public access
+      # block is still declared explicitly so the intent is on the page rather
+      # than assumed. BucketEncryption is deliberately not declared: the default
+      # is already AES256, so declaring it would add an API call that could hit
+      # an unknown deny without changing the result.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-bucket"
+        - Key: Purpose
+          Value: vocareum-smoke-test
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  # SSM Parameter Store entry. Standard tier parameters are free and the write is
+  # a single ssm:PutParameter call, which is about as small an API surface as a
+  # CloudFormation resource can have.
+  #
+  # IAM decision, recorded here on purpose. This template creates no IAM role,
+  # no instance profile, and no bucket policy. IAM write actions are one of the
+  # most common things an education platform caps with an SCP, and CloudFormation
+  # creates resources in parallel, so a denied iam:CreateRole would roll the stack
+  # back and destroy the evidence about S3, SSM, and Logs that this run exists to
+  # collect. A role is also not needed yet, because nothing here assumes one:
+  # there is no compute, no Lambda, and no service that has to call another
+  # service. IAM gets tested in its own separate phase, after the ceiling on the
+  # plain data resources is known, so that a deny on IAM stays isolated to IAM.
+  LabParameter:
+    Type: AWS::SSM::Parameter
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Name: !Sub "/${ResourcePrefix}/${AWS::StackName}/smoke-test"
+      Type: String
+      Tier: Standard
+      Description: Vocareum lab smoke test marker written by CloudFormation.
+      # The value is built from pseudo parameters, so reading it back in the
+      # console shows which account and which stack instance produced it.
+      Value: !Sub "account=${AWS::AccountId} region=${AWS::Region} stack=${AWS::StackId}"
+      Tags:
+        Name: !Sub "${ResourcePrefix}-parameter"
+        Purpose: vocareum-smoke-test
+        StackName: !Ref AWS::StackName
+
+  # CloudWatch Logs log group. An empty log group with a retention period costs
+  # nothing, and logs:CreateLogGroup is the least likely of the three writes to
+  # be capped. The group name is scoped by stack name, which is enough because
+  # log group names are unique per account and region rather than globally.
+  LabLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/${ResourcePrefix}/${AWS::StackName}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-log-group"
+        - Key: Purpose
+          Value: vocareum-smoke-test
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  # IAM::RolePolicy grants below. All apply to the same voclabs session role,
+  # via the CloudFormation deployer role rather than Vocareum's lab.policy
+  # merge — see the comment at the top of this file for why. Every statement
+  # here mirrors lab.policy's retired statements verbatim (same actions, same
+  # resources), except that ARNs lab.policy wrote with the IAM policy
+  # variable ${aws:PrincipalAccount} are written here with the CloudFormation
+  # pseudo-parameter ${AWS::AccountId} instead: cfn-lint's ARN-shape check
+  # doesn't recognize the IAM variable form and errors on it, and
+  # CloudFormation already knows the deploying account, so Fn::Sub resolves
+  # to the identical value without needing a lint suppression.
+  #
+  # bedrock:ListFoundationModels gets its own statement with Resource: "*"
+  # rather than sharing the ARN-scoped Bedrock statement below: a live test
+  # on 2026-08-04 showed it stayed Denied even after InvokeModel and
+  # GetFoundationModel, scoped identically, flipped to Allowed — consistent
+  # with ListFoundationModels being one of the Bedrock actions that doesn't
+  # support resource-level permissions at all, so an ARN-scoped statement
+  # never matches it regardless of what it lists.
+  LabRoleBedrockGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateBedrockGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Bedrock
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:GetFoundationModel
+            Resource:
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.*"
+          - Sid: BedrockList
+            Effect: Allow
+            Action:
+              - bedrock:ListFoundationModels
+            Resource: "*"
+
+  LabRoleAgentCoreGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateAgentCoreGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AgentCoreList
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:ListAgentRuntimes
+              - bedrock-agentcore:ListAgentRuntimeEndpoints
+              - bedrock-agentcore:ListGateways
+              - bedrock-agentcore:ListGatewayTargets
+              - bedrock-agentcore:ListMemories
+            Resource: "*"
+          # The three top-level creates get their own statement with
+          # Resource: "*" for the same reason bedrock:ListFoundationModels
+          # does above. They support no resource-level permissions, so IAM
+          # authorizes them against "*" and the ARN-scoped statement below
+          # never matches, no matter what ARN it names. Confirmed on
+          # 2026-08-05 with iam:SimulateCustomPolicy: probed with
+          # Resource: "*", with the account wildcard, and with runtime/*,
+          # only the first is allowed. The calls currently succeed in a lab
+          # session anyway, through the platform's session-role policy.
+          # This template grants them explicitly so it does not rely on that.
+          #
+          # The child creates, CreateAgentRuntimeEndpoint and
+          # CreateGatewayTarget, do take a resource and stay scoped below.
+          - Sid: AgentCoreCreate
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateAgentRuntime
+              - bedrock-agentcore:CreateGateway
+              - bedrock-agentcore:CreateMemory
+            Resource: "*"
+          - Sid: AgentCoreManage
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:GetAgentRuntime
+              - bedrock-agentcore:DeleteAgentRuntime
+              - bedrock-agentcore:UpdateAgentRuntime
+              - bedrock-agentcore:CreateAgentRuntimeEndpoint
+              - bedrock-agentcore:GetAgentRuntimeEndpoint
+              - bedrock-agentcore:DeleteAgentRuntimeEndpoint
+              - bedrock-agentcore:GetGateway
+              - bedrock-agentcore:DeleteGateway
+              - bedrock-agentcore:CreateGatewayTarget
+              - bedrock-agentcore:GetGatewayTarget
+              - bedrock-agentcore:DeleteGatewayTarget
+              - bedrock-agentcore:SynchronizeGatewayTargets
+              - bedrock-agentcore:InvokeAgentRuntime
+              - bedrock-agentcore:InvokeGateway
+              - bedrock-agentcore:CreateWorkloadIdentity
+              - bedrock-agentcore:GetWorkloadIdentity
+              - bedrock-agentcore:DeleteWorkloadIdentity
+              - bedrock-agentcore:GetMemory
+              - bedrock-agentcore:DeleteMemory
+              - bedrock-agentcore:UpdateMemory
+              # Step 10 of lab-01-verify-environment.ipynb tags a memory and
+              # reads the tag back. The workshop tag is how the cleanup module
+              # finds AgentCore resources to delete, so without TagResource
+              # nothing it creates can be found again. UntagResource stays out
+              # until something calls it.
+              - bedrock-agentcore:TagResource
+              - bedrock-agentcore:ListTagsForResource
+            Resource: !Sub "arn:aws:bedrock-agentcore:us-east-1:${AWS::AccountId}:*"
+
+  LabRoleECRGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateECRGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ECR
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:CreateRepository
+              - ecr:DeleteRepository
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchCheckLayerAvailability
+              - ecr:PutImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:DescribeRepositories
+            Resource: "*"
+
+  LabRoleOtherGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateOtherGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Other
+            Effect: Allow
+            Action:
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeVpcs
+              - codebuild:CreateProject
+              - codebuild:DeleteProject
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+              - codebuild:ListProjects
+              - secretsmanager:GetSecretValue
+              - sts:GetCallerIdentity
+              - aws-marketplace:ViewSubscriptions
+              - aws-marketplace:Subscribe
+              - aws-marketplace:Unsubscribe
+            Resource: "*"
+          # Step 12 of lab-01-verify-environment.ipynb creates a secret with
+          # tags, describes it, reads it, and deletes it on teardown. The
+          # Other statement above grants only GetSecretValue, so the create,
+          # the tag, the describe, and the delete all needed a grant. Only
+          # the four actions the notebook calls are listed; PutSecretValue
+          # and UpdateSecret stay out until something calls them.
+          #
+          # Resource is secret:* rather than a name prefix because Secrets
+          # Manager appends six random characters to every secret ARN. A
+          # secret:workshop*/* pattern would cover this notebook and miss
+          # the workshop's own secret names, so secret:* is the honest scope.
+          - Sid: SecretsManagerWrite
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:TagResource
+            Resource: !Sub "arn:aws:secretsmanager:us-east-1:${AWS::AccountId}:secret:*"
+
+  LabRoleDynamoDBGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateDynamoDBGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DynamoDB
+            Effect: Allow
+            Action:
+              - dynamodb:CreateTable
+              - dynamodb:DeleteTable
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Scan
+              - dynamodb:Query
+              - dynamodb:BatchWriteItem
+              - dynamodb:ListTables
+              - dynamodb:TagResource
+            Resource: !Sub "arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/workshop-*"
+
+  LabRoleLambdaGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateLambdaGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Lambda
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:GetFunction
+              - lambda:InvokeFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:PublishLayerVersion
+              - lambda:GetLayerVersion
+              - lambda:DeleteLayerVersion
+              - lambda:ListLayerVersions
+              - lambda:ListFunctions
+            Resource:
+              - !Sub "arn:aws:lambda:us-east-1:${AWS::AccountId}:function:hotel-booking-*"
+              - !Sub "arn:aws:lambda:us-east-1:${AWS::AccountId}:layer:workshop-*"
+
+  LabRoleIAMGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateIAMGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: IAM
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PassRole
+              - iam:TagRole
+              - iam:ListAttachedRolePolicies
+              - iam:ListRolePolicies
+              - iam:GetRolePolicy
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/workshop-*"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/AmazonBedrockAgentCoreSDK*"
+          - Sid: IAMServiceLinkedRole
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*agentcore*"
+            Condition:
+              StringLike:
+                iam:AWSServiceName: "*agentcore*"
+
+  LabRoleS3Grant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateS3Grant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:DeleteBucket
+              - s3:PutBucketPolicy
+              - s3:GetBucketLocation
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutBucketVersioning
+              - s3:GetBucketVersioning
+              # The build-source bucket is the one thing the notebook depends on
+              # that CreateBucket cannot tag in its own request, and PutObject
+              # carrying a Tagging value authorizes against s3:PutObjectTagging
+              # as well as s3:PutObject. Without these two, step 7 of
+              # lab-01-verify-environment.ipynb is refused outright rather than
+              # storing an untagged object, and the tag half of the step 14
+              # sweep never sees the bucket at all.
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutObjectTagging
+            # Object actions authorize against arn:aws:s3:::bucket/key, not
+            # against the bucket ARN, so the bucket-only list left
+            # s3:PutObject and s3:DeleteObject with no matching resource and
+            # step 7 of lab-01-verify-environment.ipynb could not upload the
+            # CodeBuild source zip. Bucket actions ignore the /* entries and
+            # object actions ignore the bucket entries, so one combined list
+            # covers both without a second statement.
+            Resource:
+              - "arn:aws:s3:::workshop-*"
+              - "arn:aws:s3:::bedrock-agentcore-*"
+              - "arn:aws:s3:::amazonbedrockagentcoresdk*"
+              - "arn:aws:s3:::workshop-*/*"
+              - "arn:aws:s3:::bedrock-agentcore-*/*"
+              - "arn:aws:s3:::amazonbedrockagentcoresdk*/*"
+
+  LabRoleLogsGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateLogsGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:PutDeliverySource
+              - logs:PutResourcePolicy
+              - logs:CreateDelivery
+              - logs:PutDeliveryDestination
+              - logs:DeleteLogGroup
+              # The step 14 sweep reads a log group's tags before deleting it.
+              # AgentCore creates these groups itself and creates them untagged,
+              # so the name prefix is what actually selects them and a refused
+              # read is survivable. It is granted so the tag half is a real
+              # second opinion rather than a call that always answers "no".
+              - logs:ListTagsForResource
+            Resource:
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/hotel-booking-*:*"
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*:*"
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:aws/spans:*"
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/application-signals/data:*"
+
+Outputs:
+  # The GetAtt outputs are the evidence. A GetAtt only resolves after the service
+  # has really created the resource and returned its attributes, so a stack that
+  # reaches CREATE_COMPLETE with these values populated proves creation rather
+  # than echoing the inputs back.
+  BucketName:
+    Description: Name of the S3 bucket created for this student session
+    Value: !Ref LabBucket
+
+  BucketArn:
+    Description: ARN of the bucket, returned by S3 after creation
+    Value: !GetAtt LabBucket.Arn
+
+  BucketRegionalDomainName:
+    Description: >-
+      Regional endpoint S3 assigned to the bucket. Present only once the bucket
+      exists, and it names the region the lab actually ran in.
+    Value: !GetAtt LabBucket.RegionalDomainName
+
+  LogGroupArn:
+    Description: >-
+      ARN of the CloudWatch Logs group, returned by CloudWatch Logs after
+      creation. Contains the student account ID.
+    Value: !GetAtt LabLogGroup.Arn
+
+  ParameterName:
+    Description: Parameter Store path holding the smoke test marker
+    Value: !Ref LabParameter
+
+  ConsoleLink:
+    Description: Direct link to this bucket in the S3 console
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/s3/buckets/${LabBucket}?region=${AWS::Region}"

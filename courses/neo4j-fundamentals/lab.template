@@ -1,0 +1,1033 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Vocareum AWS lab environment. Creates the three free-at-rest smoke-test
+  resources (S3 bucket, SSM Parameter Store entry, CloudWatch Logs log group)
+  that prove Vocareum runs lab.template per student, plus every IAM::RolePolicy
+  grant the workshop's session role needs: Bedrock, AgentCore, ECR, DynamoDB,
+  Lambda, IAM role management, S3, CloudWatch Logs, and the CodeBuild/EC2-
+  describe/Secrets-Manager/Marketplace/STS statement. See the comment
+  immediately below for why these grants live here instead of in a separate
+  lab.policy file.
+
+  Also carries the account sweep, a Lambda-backed custom resource that deletes
+  leaked workshop resources on stack Create and again on stack Delete. See the
+  "Account sweep" comment below.
+
+  Deploy by uploading this file to /voc/private/lab.template in Configure
+  Workspace. The filename must be exactly lab.template.
+
+# Why every permission grant lives in this one file, not in a separate
+# lab.policy. lab.policy, standard IAM policy JSON that Vocareum merges into
+# the student session role at session start, was the first design tried. A
+# live test on 2026-08-04 found that several of its statements were not in
+# effect on the session role: Bedrock, AgentCore, ECR-write, and Secrets
+# Manager calls came back Denied even though the file granted them, several
+# with an unscoped Resource: "*", which rules out a resource-pattern typo.
+#
+# The same statements, delivered instead as AWS::IAM::RolePolicy resources
+# in this template, applied correctly on the next live test: CloudFormation
+# attaches them to the voclabs role using the deployer role's own
+# credentials. Once that was confirmed, there was no reason to keep two
+# descriptions of the same grants, so every statement lab.policy used to
+# carry was folded in here and lab.policy was retired. docs/deploying.md's
+# lab.policy section has the details.
+#
+# The workshop still provisions everything else itself, at runtime, with this
+# same session role: its own S3 buckets, its own ECR repos, its own IAM
+# roles, its own AgentCore gateways and memories, via boto3 scripts the
+# student runs from inside the notebook.
+# sample-stop-ai-agent-hallucinations-workshop/setup/provision_agentcore.py
+# is one example; the core numbered notebooks provision the same way inline.
+# This template only grants the permissions those scripts need; it does not
+# pre-create the resources themselves, which would just be a second,
+# redundant path to something the notebooks already make and clean up on
+# their own. Neo4j runs on Aura, external to AWS (docs/neo4j-aura.md), so
+# nothing about it belongs here either.
+#
+# The one real gap left, Anthropic model access
+# (bedrock:PutUseCaseForModelAccess and the session policy listing the
+# current model IDs), is an account-level Vocareum setting. No
+# CloudFormation resource in this account can grant it, so it is tracked
+# as an open ask in simplified-perm.md instead of being worked around here.
+#
+# Do not restate a permission result here: this comment went stale within
+# hours the last time it carried one. Every resource below is measured as
+# permitted.
+#
+# Design notes:
+#   - The three resources are deliberately independent of each other. No resource
+#     references another, so CloudFormation creates them in parallel and the stack
+#     events report a separate CREATE_COMPLETE or CREATE_FAILED for each one. A
+#     failure therefore still tells us which of the three services the SCP allows,
+#     instead of collapsing into a single unusable data point.
+#   - No instance profile is created, and the only IAM role is the account
+#     sweep's execution role. See the comment on LabParameter for why the three
+#     smoke-test resources avoid IAM, and the "Account sweep" comment for why the
+#     sweep cannot.
+#   - No compute, no NAT, no VPC endpoints, no KMS customer managed key. Every
+#     resource here is free at rest, which matters against the $100 per month and
+#     $200 total per student budgets.
+
+# Account sweep, added 2026-08-06. Four resources: LabSweepRole,
+# LabSweepRolePolicy, LabSweepFunction, LabSweepOnDelete.
+#
+# What it is for. The workshop's notebooks create AgentCore runtimes and
+# memories, ECR repos, CodeBuild projects, Lambdas, buckets, tables, secrets,
+# IAM roles and log groups with boto3, and tear them down in their last cells. A
+# student who closes the notebook early tears down nothing. Stack Delete is the
+# one session-end signal measured to always fire, finished or not, so a
+# Lambda-backed custom resource wired to it is the only cleanup that cannot be
+# skipped. It sweeps on Create too, because Vocareum reuses a pool of accounts
+# and one can arrive still holding the previous student's leftovers.
+#
+# Why it sweeps one kind of resource and not eleven. The full sweep is
+# src/vocareum_tools/sweep.py: eleven kinds, validated live for nine of them.
+# Inlined here it is about 37,000 bytes of YAML, against a 51,200 cap on an
+# inline TemplateBody and a file already near 25,000 without it. It does not fit
+# at any level of prose, and cutting the two slowest kinds saves only about 2,300
+# bytes, so ten does not fit either. A base85 blob does fit, at 95 percent of the
+# cap, and was rejected: the one part of this file that deletes things would
+# become the one part nobody can read. So LabSweepFunction carries the AgentCore
+# runtime log group and nothing else, which proves the mechanism with a real
+# delete and stays reviewable. The other ten stay operator-side in sweep.py.
+#
+# A third principal, and it is not optional. The deployer role and the student
+# session role are measured separately because a result for one is not a result
+# for the other. A custom resource adds a third: it calls
+# AWS as its own execution role, LabSweepRole, never as the deployer and never as
+# voclabs. logs:DeleteLogGroup succeeding here says nothing about either of the
+# others, and the 9 grants above say nothing about this one. LabSweepRolePolicy
+# is the only thing that authorizes the sweep.
+#
+# The first run measures four deployer actions never measured before,
+# iam:CreateRole, iam:PutRolePolicy on a role just created, lambda:CreateFunction
+# and iam:PassRole, plus whether CloudFormation can invoke a custom resource in
+# this account at all.
+#
+# Why this can still break the lab, said plainly rather than papered over.
+# CloudFormation has no per-resource failure tolerance on a create: no
+# ContinueOnFailure, DependsOn does not confer one, Condition cannot express one,
+# and a nested stack propagates its child's failure to the parent. A custom
+# resource that signals SUCCESS whatever happens does absorb a failure, and
+# LabSweepFunction is written that way, but that covers only the invocation. The
+# three creates underneath it are ordinary resources and a denial on any of them
+# fails the stack. LabSweepRole therefore DependsOn all 12 resources above it, so
+# the sweep is attempted strictly last and everything a student needs has already
+# reached CREATE_COMPLETE. That is the whole of the isolation on offer, and it is
+# partial: Vocareum tears the account down the instant CloudFormation fails, so a
+# student who hit this would get "Lab is in CREATE_FAILED state" and no lab. The
+# bucket, the parameter, the log group and the 9 grants would survive it, because
+# failed stacks are observed sitting in CREATE_FAILED rather than
+# ROLLBACK_COMPLETE (docs/diagnosing.md), and the events would carry a verdict
+# for each. That is the risk this launch spends.
+#
+# On Delete the failure mode is worse, which is why the handler never reports
+# failure: a custom resource that fails or times out on Delete leaves the stack
+# in DELETE_FAILED, after CloudFormation waits an hour for a response that is not
+# coming, and that pins the account and blocks the pool rotation.
+#
+# Two results that would not be permission answers. An InsufficientCapabilities
+# failure names capabilities and no action; the comment on LabSweepRole has what
+# that means. And Lambda validates that a role can be assumed by
+# lambda.amazonaws.com, so "cannot be assumed by Lambda" on a brand new role is
+# eventual consistency and files as untested.
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: vocareum-lab
+    AllowedPattern: "[a-z0-9][a-z0-9-]{1,20}[a-z0-9]"
+    Description: >-
+      Lowercase prefix applied to the bucket name and to the tag values. Kept
+      lowercase and short because S3 bucket names must be lowercase and are
+      capped at 63 characters. Vocareum passes no parameter values, so the
+      default has to be the working value.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+    Description: >-
+      Retention on the lab log group. A retention period is always set so the
+      group cannot accumulate cost indefinitely if a later phase writes to it.
+      The list is kept short so the value cannot be raised to a year if it is
+      ever overridden.
+
+Resources:
+  # S3 bucket. Chosen because it is the most visible proof in the console and
+  # because GetAtt on a bucket returns values that only exist once the bucket is
+  # really created. The bucket is left empty by this template, so a plain Delete
+  # policy always succeeds. Retain is deliberately not used, because a retained
+  # bucket outlives the lab session and leaves the student with an orphan they
+  # cannot see or remove.
+  LabBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      # Bucket names are a single global namespace and Vocareum starts many
+      # student stacks at once, so the name is derived entirely from intrinsics.
+      # The account ID separates students from each other. The trailing 12 hex
+      # characters are the last group of the stack GUID, which separates one lab
+      # start from the next in the same account, so restarting the lab cannot
+      # collide with a bucket left behind by an earlier run. Worst case length is
+      # 21 + 1 + 12 + 1 + 12 = 47 characters, inside the 63 character limit.
+      BucketName: !Sub
+        - "${ResourcePrefix}-${AWS::AccountId}-${StackSuffix}"
+        - StackSuffix: !Select [4, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+      # Buckets are private and encrypted with SSE-S3 by default. Public access
+      # block is still declared explicitly so the intent is on the page rather
+      # than assumed. BucketEncryption is deliberately not declared: the default
+      # is already AES256, so declaring it would add an API call that could hit
+      # an unknown deny without changing the result.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-bucket"
+        - Key: Purpose
+          Value: vocareum-smoke-test
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  # SSM Parameter Store entry. Standard tier parameters are free and the write is
+  # a single ssm:PutParameter call, which is about as small an API surface as a
+  # CloudFormation resource can have.
+  #
+  # IAM decision, recorded here on purpose. This template creates no IAM role,
+  # no instance profile, and no bucket policy. IAM write actions are one of the
+  # most common things an education platform caps with an SCP, and CloudFormation
+  # creates resources in parallel, so a denied iam:CreateRole would roll the stack
+  # back and destroy the evidence about S3, SSM, and Logs that this run exists to
+  # collect. A role is also not needed yet, because nothing here assumes one:
+  # there is no compute, no Lambda, and no service that has to call another
+  # service. IAM gets tested in its own separate phase, after the ceiling on the
+  # plain data resources is known, so that a deny on IAM stays isolated to IAM.
+  LabParameter:
+    Type: AWS::SSM::Parameter
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Name: !Sub "/${ResourcePrefix}/${AWS::StackName}/smoke-test"
+      Type: String
+      Tier: Standard
+      Description: Vocareum lab smoke test marker written by CloudFormation.
+      # The value is built from pseudo parameters, so reading it back in the
+      # console shows which account and which stack instance produced it.
+      Value: !Sub "account=${AWS::AccountId} region=${AWS::Region} stack=${AWS::StackId}"
+      Tags:
+        Name: !Sub "${ResourcePrefix}-parameter"
+        Purpose: vocareum-smoke-test
+        StackName: !Ref AWS::StackName
+
+  # CloudWatch Logs log group. An empty log group with a retention period costs
+  # nothing, and logs:CreateLogGroup is the least likely of the three writes to
+  # be capped. The group name is scoped by stack name, which is enough because
+  # log group names are unique per account and region rather than globally.
+  LabLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/${ResourcePrefix}/${AWS::StackName}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-log-group"
+        - Key: Purpose
+          Value: vocareum-smoke-test
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  # IAM::RolePolicy grants below. All apply to the same voclabs session role,
+  # via the CloudFormation deployer role rather than Vocareum's lab.policy
+  # merge — see the comment at the top of this file for why. Every statement
+  # here mirrors lab.policy's retired statements verbatim (same actions, same
+  # resources), except that ARNs lab.policy wrote with the IAM policy
+  # variable ${aws:PrincipalAccount} are written here with the CloudFormation
+  # pseudo-parameter ${AWS::AccountId} instead: cfn-lint's ARN-shape check
+  # doesn't recognize the IAM variable form and errors on it, and
+  # CloudFormation already knows the deploying account, so Fn::Sub resolves
+  # to the identical value without needing a lint suppression.
+  #
+  # bedrock:ListFoundationModels gets its own statement with Resource: "*"
+  # rather than sharing the ARN-scoped Bedrock statement below: a live test
+  # on 2026-08-04 showed it stayed Denied even after InvokeModel and
+  # GetFoundationModel, scoped identically, flipped to Allowed — consistent
+  # with ListFoundationModels being one of the Bedrock actions that doesn't
+  # support resource-level permissions at all, so an ARN-scoped statement
+  # never matches it regardless of what it lists.
+  LabRoleBedrockGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateBedrockGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Bedrock
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:GetFoundationModel
+            Resource:
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.*"
+          - Sid: BedrockList
+            Effect: Allow
+            Action:
+              - bedrock:ListFoundationModels
+            Resource: "*"
+
+  LabRoleAgentCoreGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateAgentCoreGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AgentCoreList
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:ListAgentRuntimes
+              - bedrock-agentcore:ListAgentRuntimeEndpoints
+              - bedrock-agentcore:ListGateways
+              - bedrock-agentcore:ListGatewayTargets
+              - bedrock-agentcore:ListMemories
+            Resource: "*"
+          # The three top-level creates get their own statement with
+          # Resource: "*" for the same reason bedrock:ListFoundationModels
+          # does above. They support no resource-level permissions, so IAM
+          # authorizes them against "*" and the ARN-scoped statement below
+          # never matches, no matter what ARN it names. Confirmed on
+          # 2026-08-05 with iam:SimulateCustomPolicy: probed with
+          # Resource: "*", with the account wildcard, and with runtime/*,
+          # only the first is allowed. The calls currently succeed in a lab
+          # session anyway, through the platform's session-role policy.
+          # This template grants them explicitly so it does not rely on that.
+          #
+          # The child creates, CreateAgentRuntimeEndpoint and
+          # CreateGatewayTarget, do take a resource and stay scoped below.
+          - Sid: AgentCoreCreate
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateAgentRuntime
+              - bedrock-agentcore:CreateGateway
+              - bedrock-agentcore:CreateMemory
+            Resource: "*"
+          - Sid: AgentCoreManage
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:GetAgentRuntime
+              - bedrock-agentcore:DeleteAgentRuntime
+              - bedrock-agentcore:UpdateAgentRuntime
+              - bedrock-agentcore:CreateAgentRuntimeEndpoint
+              - bedrock-agentcore:GetAgentRuntimeEndpoint
+              - bedrock-agentcore:DeleteAgentRuntimeEndpoint
+              - bedrock-agentcore:GetGateway
+              - bedrock-agentcore:DeleteGateway
+              - bedrock-agentcore:CreateGatewayTarget
+              - bedrock-agentcore:GetGatewayTarget
+              - bedrock-agentcore:DeleteGatewayTarget
+              - bedrock-agentcore:SynchronizeGatewayTargets
+              - bedrock-agentcore:InvokeAgentRuntime
+              - bedrock-agentcore:InvokeGateway
+              - bedrock-agentcore:CreateWorkloadIdentity
+              - bedrock-agentcore:GetWorkloadIdentity
+              - bedrock-agentcore:DeleteWorkloadIdentity
+              - bedrock-agentcore:GetMemory
+              - bedrock-agentcore:DeleteMemory
+              - bedrock-agentcore:UpdateMemory
+              # Step 10 of lab-01-verify-environment.ipynb tags a memory and
+              # reads the tag back. The workshop tag is how the cleanup module
+              # finds AgentCore resources to delete, so without TagResource
+              # nothing it creates can be found again. UntagResource stays out
+              # until something calls it.
+              - bedrock-agentcore:TagResource
+              - bedrock-agentcore:ListTagsForResource
+            Resource: !Sub "arn:aws:bedrock-agentcore:us-east-1:${AWS::AccountId}:*"
+
+  LabRoleECRGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateECRGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ECR
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:CreateRepository
+              - ecr:DeleteRepository
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchCheckLayerAvailability
+              - ecr:PutImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:DescribeRepositories
+            Resource: "*"
+
+  LabRoleOtherGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateOtherGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Other
+            Effect: Allow
+            Action:
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeVpcs
+              - codebuild:CreateProject
+              - codebuild:DeleteProject
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+              - codebuild:ListProjects
+              - secretsmanager:GetSecretValue
+              - sts:GetCallerIdentity
+              - aws-marketplace:ViewSubscriptions
+              - aws-marketplace:Subscribe
+              - aws-marketplace:Unsubscribe
+            Resource: "*"
+          # Step 12 of lab-01-verify-environment.ipynb creates a secret with
+          # tags, describes it, reads it, and deletes it on teardown. The
+          # Other statement above grants only GetSecretValue, so the create,
+          # the tag, the describe, and the delete all needed a grant. Only
+          # the four actions the notebook calls are listed; PutSecretValue
+          # and UpdateSecret stay out until something calls them.
+          #
+          # Resource is secret:* rather than a name prefix because Secrets
+          # Manager appends six random characters to every secret ARN. A
+          # secret:workshop*/* pattern would cover this notebook and miss
+          # the workshop's own secret names, so secret:* is the honest scope.
+          - Sid: SecretsManagerWrite
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:TagResource
+            Resource: !Sub "arn:aws:secretsmanager:us-east-1:${AWS::AccountId}:secret:*"
+
+  LabRoleDynamoDBGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateDynamoDBGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DynamoDB
+            Effect: Allow
+            Action:
+              - dynamodb:CreateTable
+              - dynamodb:DeleteTable
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Scan
+              - dynamodb:Query
+              - dynamodb:BatchWriteItem
+              - dynamodb:ListTables
+              - dynamodb:TagResource
+            Resource: !Sub "arn:aws:dynamodb:us-east-1:${AWS::AccountId}:table/workshop-*"
+
+  LabRoleLambdaGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateLambdaGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Lambda
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:GetFunction
+              - lambda:InvokeFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:PublishLayerVersion
+              - lambda:GetLayerVersion
+              - lambda:DeleteLayerVersion
+              - lambda:ListLayerVersions
+              - lambda:ListFunctions
+            Resource:
+              - !Sub "arn:aws:lambda:us-east-1:${AWS::AccountId}:function:hotel-booking-*"
+              - !Sub "arn:aws:lambda:us-east-1:${AWS::AccountId}:layer:workshop-*"
+
+  LabRoleIAMGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateIAMGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: IAM
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PassRole
+              - iam:TagRole
+              - iam:ListAttachedRolePolicies
+              - iam:ListRolePolicies
+              - iam:GetRolePolicy
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/workshop-*"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/AmazonBedrockAgentCoreSDK*"
+          - Sid: IAMServiceLinkedRole
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*agentcore*"
+            Condition:
+              StringLike:
+                iam:AWSServiceName: "*agentcore*"
+
+  LabRoleS3Grant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateS3Grant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:DeleteBucket
+              - s3:PutBucketPolicy
+              - s3:GetBucketLocation
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutBucketVersioning
+              - s3:GetBucketVersioning
+              # The build-source bucket is the one thing the notebook depends on
+              # that CreateBucket cannot tag in its own request, and PutObject
+              # carrying a Tagging value authorizes against s3:PutObjectTagging
+              # as well as s3:PutObject. Without these two, step 7 of
+              # lab-01-verify-environment.ipynb is refused outright rather than
+              # storing an untagged object, and the tag half of the step 14
+              # sweep never sees the bucket at all.
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutObjectTagging
+            # Object actions authorize against arn:aws:s3:::bucket/key, not
+            # against the bucket ARN, so the bucket-only list left
+            # s3:PutObject and s3:DeleteObject with no matching resource and
+            # step 7 of lab-01-verify-environment.ipynb could not upload the
+            # CodeBuild source zip. Bucket actions ignore the /* entries and
+            # object actions ignore the bucket entries, so one combined list
+            # covers both without a second statement.
+            Resource:
+              - "arn:aws:s3:::workshop-*"
+              - "arn:aws:s3:::bedrock-agentcore-*"
+              - "arn:aws:s3:::amazonbedrockagentcoresdk*"
+              - "arn:aws:s3:::workshop-*/*"
+              - "arn:aws:s3:::bedrock-agentcore-*/*"
+              - "arn:aws:s3:::amazonbedrockagentcoresdk*/*"
+
+  LabRoleLogsGrant:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: voclabs
+      PolicyName: LabTemplateLogsGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:PutDeliverySource
+              - logs:PutResourcePolicy
+              - logs:CreateDelivery
+              - logs:PutDeliveryDestination
+              - logs:DeleteLogGroup
+              # The step 14 sweep reads a log group's tags before deleting it.
+              # AgentCore creates these groups itself and creates them untagged,
+              # so the name prefix is what actually selects them and a refused
+              # read is survivable. It is granted so the tag half is a real
+              # second opinion rather than a call that always answers "no".
+              - logs:ListTagsForResource
+            Resource:
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/hotel-booking-*:*"
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*:*"
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:aws/spans:*"
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/application-signals/data:*"
+
+  # The account sweep, all four resources below. The "Account sweep" comment at
+  # the top of this file is the reasoning; read it before changing any of them.
+  #
+  # No name is set on the role or the function, and that is load-bearing twice.
+  #
+  # Capabilities. An AWS::IAM::Role needs CAPABILITY_IAM on CreateStack and a
+  # custom-named one needs CAPABILITY_NAMED_IAM. Which Vocareum passes is
+  # unmeasured, and the 9 grants above are no evidence: AWS::IAM::RolePolicy is
+  # absent from CloudFormation's IAM capability list and has never needed one,
+  # checked against the CreateStack API reference on 2026-08-06. A generated name
+  # is accepted under either capability and a fixed one only under the stricter,
+  # so generating it survives two of three cases instead of one. Guessing wrong
+  # rejects the whole CreateStack rather than failing one resource: no lab for the
+  # student and no answer either.
+  #
+  # And the sweeper cannot target its own executor. The generated name is
+  # <stack-name>-LabSweepRole-<suffix> and Vocareum stack names begin with a c and
+  # a digit run, so it can never match an entry in sweep.py's IAM_ROLE_PREFIXES,
+  # where roles are selected on name prefix only and never on a tag. That holds
+  # independently of the stack-owned exclusion, which is the belt to this brace.
+  LabSweepRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    # Attempted strictly last, so a denial here cannot abort an in-flight create
+    # of anything a student needs. This is the whole of the isolation
+    # CloudFormation offers on a create.
+    DependsOn:
+      - LabBucket
+      - LabParameter
+      - LabLogGroup
+      - LabRoleBedrockGrant
+      - LabRoleAgentCoreGrant
+      - LabRoleECRGrant
+      - LabRoleOtherGrant
+      - LabRoleDynamoDBGrant
+      - LabRoleLambdaGrant
+      - LabRoleIAMGrant
+      - LabRoleS3Grant
+      - LabRoleLogsGrant
+    Properties:
+      Description: >-
+        Execution role for the account sweep. A third principal, distinct from
+        the template deployer and from the voclabs session role, and a permission
+        result for it is a result for it alone.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  # Its own resource rather than folded into the role's Policies block, so the
+  # events report iam:CreateRole and iam:PutRolePolicy separately instead of
+  # collapsing two unmeasured deployer actions into one verdict.
+  LabSweepRolePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref LabSweepRole
+      PolicyName: LabTemplateSweepGrant
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # The only destructive permission the sweep holds, and the narrowness
+          # is the point: a bug in the handler's prefix matching still cannot
+          # reach a log group outside this path, because IAM refuses it.
+          - Sid: SweepDeleteAgentCoreRuntimeLogGroups
+            Effect: Allow
+            Action:
+              - logs:DeleteLogGroup
+            Resource:
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:*"
+          # Unscoped on purpose, and it is a read. DescribeLogGroups is a list
+          # whose whole result set is what gets filtered, and scoping a list to
+          # the path being listed is the kind of thing that returns an empty
+          # result rather than an error. An empty result would read as "the
+          # account is clean" and mask the delete this launch is measuring.
+          - Sid: SweepListLogGroups
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource: "*"
+          # The function's own log group. Lambda creates it lazily, so without
+          # this the sweep still runs and its report is lost, which for a
+          # Delete-time sweep means lost for good. It cannot be scoped tighter
+          # than /aws/lambda/* because the function name is generated.
+          - Sid: SweepOwnLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub "arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/*:*"
+          # Reads which resources this stack owns, so the sweep leaves them
+          # alone. The handler reports a refusal here and carries on, which is
+          # safe only because this template declares nothing under the AgentCore
+          # runtimes path. stack_owned's docstring says what must change first.
+          - Sid: SweepReadOwnStack
+            Effect: Allow
+            Action:
+              - cloudformation:ListStackResources
+            Resource:
+              - !Ref AWS::StackId
+
+  # No AWS::Logs::LogGroup is declared for this function, deliberately: Lambda
+  # creates its group lazily, so leaving it undeclared means a Logs denial cannot
+  # fail the stack. The price, which lab-probe.template already records, is that
+  # CloudFormation does not own the group, so /aws/lambda/<generated-name>
+  # outlives the stack and is itself a candidate for a wider sweep later. Timeout
+  # is sized for one synchronous delete with no wait loop to fund, and the handler
+  # reserves the last 20 seconds of the clock to send its response.
+  LabSweepFunction:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt LabSweepRole.Arn
+      MemorySize: 256
+      Timeout: 120
+      Description: >-
+        Deletes leaked workshop AgentCore runtime log groups on stack Create and
+        again on stack Delete. Reports SUCCESS on every path by design.
+      Code:
+        ZipFile: |
+          """Delete leaked workshop log groups on stack Create and again on stack Delete.
+
+          The "Account sweep" comment in lab.template carries the design reasoning. Read
+          it before changing anything here.
+
+          The one invariant: every path responds SUCCESS. A custom resource that fails or
+          times out on Delete leaves the stack in DELETE_FAILED, after CloudFormation
+          waits an hour for a response that is not coming, which pins the account and
+          blocks the pool rotation. Refusals, crashes and a spent clock are all reported
+          in the response Data and in this function's log group instead of raised.
+          """
+
+          import json
+          import urllib.request
+
+          # Mirrors sweep.py's AGENTCORE_RUNTIME_LOG_PREFIX and NAME_PREFIXES, combined the
+          # same way. Change these when those change.
+          LOG_PATH = "/aws/bedrock-agentcore/runtimes/"
+          NAME_PREFIXES = (
+              "verify",
+              "wsverify",
+              "workshop-",
+              "bedrock-agentcore-verify",
+              "hotel-booking-verify",
+              "agentcoreprobe",
+              "phase3probe",
+              "AmazonBedrockAgentCoreSDK",
+          )
+          LOG_GROUP_PREFIXES = tuple(LOG_PATH + prefix for prefix in NAME_PREFIXES)
+
+          # The documented shape is LOG_PATH + <agentRuntimeId>-<endpointName> +
+          # "/runtime-logs". The id leads, and an AgentCore id is <name>-<suffix>, so the
+          # workshop name leads the part after LOG_PATH and the prefixes above match. The
+          # trailing /runtime-logs is easy to forget, which is why nothing here ever builds
+          # one of these names: they are listed, and the listed name is used.
+
+          REGION = "us-east-1"
+
+          # Clock left unspent so the response is still sent after a long sweep.
+          RESERVE_MILLIS = 20000
+
+          # Fixed for the life of the stack. A different PhysicalResourceId on Update earns
+          # an extra Delete for the old one, sweeping when nothing asked for it.
+          PHYSICAL_ID = "lab-template-sweep"
+
+
+          def remaining(context):
+              """Milliseconds of usable clock left, ignoring the reserve."""
+              try:
+                  return context.get_remaining_time_in_millis() - RESERVE_MILLIS
+              except Exception:  # a manual invoke has no real context
+                  return 60000
+
+
+          def respond(event, status, reason, data):
+              """Tell CloudFormation the resource is done. Never raises.
+
+              Called from a finally block, where raising would mask the exception that sent
+              us there and still leave CloudFormation waiting.
+              """
+              url = event.get("ResponseURL")
+              if not url:
+                  print("no ResponseURL, so this is a manual invoke: nothing to signal")
+                  return
+              body = json.dumps(
+                  {
+                      "Status": status,
+                      "Reason": reason[:1000],
+                      "PhysicalResourceId": PHYSICAL_ID,
+                      "StackId": event.get("StackId", ""),
+                      "RequestId": event.get("RequestId", ""),
+                      "LogicalResourceId": event.get("LogicalResourceId", ""),
+                      "NoEcho": False,
+                      "Data": data,
+                  }
+              ).encode()
+              request = urllib.request.Request(url, data=body, method="PUT")
+              request.add_header("content-type", "")
+              request.add_header("content-length", str(len(body)))
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as answer:
+                      print(f"signalled {status}, CloudFormation answered {answer.status}")
+              except Exception as error:  # nothing left to try if this fails
+                  print(f"could not signal {status}: {type(error).__name__} {error}")
+
+
+          def stack_owned(session, stack_id):
+              """Physical ids this stack owns, so the sweep leaves them alone.
+
+              Returns an empty set when it cannot be read, which is safe here and not in
+              general: this template declares nothing under LOG_PATH, so nothing it owns
+              can match LOG_GROUP_PREFIXES. A kind added later whose names could collide
+              with a stack resource must treat an unreadable answer as a reason to delete
+              nothing at all.
+              """
+              owned = set()
+              if not stack_id:
+                  return owned
+              try:
+                  client = session.client("cloudformation", region_name=REGION)
+                  paginator = client.get_paginator("list_stack_resources")
+                  for page in paginator.paginate(StackName=stack_id):
+                      for item in page.get("StackResourceSummaries", []):
+                          identifier = item.get("PhysicalResourceId")
+                          if identifier:
+                              owned.add(str(identifier))
+              except Exception as error:  # reported, not fatal, see above
+                  print(f"stack-owned exclusion unreadable: {type(error).__name__} {error}")
+              return owned
+
+
+          def collect(logs):
+              """Every log group under the AgentCore runtimes path.
+
+              Listed by the service's path because the workshop name sits in the middle of
+              the group name, then filtered on the whole name by selected() below.
+              """
+              found = []
+              paginator = logs.get_paginator("describe_log_groups")
+              for page in paginator.paginate(logGroupNamePrefix=LOG_PATH):
+                  for item in page.get("logGroups", []):
+                      name = str(item.get("logGroupName", ""))
+                      if name:
+                          found.append(name)
+              return found
+
+
+          def selected(names, owned):
+              """Split listed groups into what will be deleted and what will not, and why."""
+              targets, skipped = [], []
+              for name in names:
+                  if not name.startswith(LOG_GROUP_PREFIXES):
+                      skipped.append((name, "no workshop prefix"))
+                  elif name in owned:
+                      skipped.append((name, "owned by this stack"))
+                  else:
+                      targets.append(name)
+              return targets, skipped
+
+
+          def gone(logs, name):
+              """True when the group is really absent, not merely deleted without error.
+
+              describe_log_groups answers a name that is gone with an empty list and no
+              error, so absence is the empty result rather than an exception.
+              """
+              try:
+                  answer = logs.describe_log_groups(logGroupNamePrefix=name, limit=50)
+              except Exception as error:  # unconfirmed is not confirmed gone
+                  print(f"could not confirm {name}: {type(error).__name__} {error}")
+                  return False
+              return not any(
+                  str(item.get("logGroupName", "")) == name
+                  for item in answer.get("logGroups", [])
+              )
+
+
+          def sweep(event, context):
+              """Delete every workshop log group the account has left behind.
+
+              Returns a report as well as printing one: the return value becomes the
+              response Data, which is all a stack output can show.
+              """
+              import boto3
+
+              session = boto3.session.Session()
+              where = session.region_name
+              if where != REGION:
+                  return {"Swept": "0", "Detail": f"wrong region {where}, expected {REGION}"}
+
+              logs = session.client("logs", region_name=REGION)
+              owned = stack_owned(session, event.get("StackId", ""))
+              listed = collect(logs)
+              targets, skipped = selected(listed, owned)
+              print(f"listed {len(listed)} under {LOG_PATH}, selected {len(targets)}")
+              for name, why in skipped:
+                  print(f"  left alone: {name} ({why})")
+
+              deleted, failed, present, ran_out = 0, [], [], False
+              for name in targets:
+                  if remaining(context) <= 0:
+                      ran_out = True
+                      print(f"out of clock with {len(targets) - deleted - len(failed)} left")
+                      break
+                  try:
+                      logs.delete_log_group(logGroupName=name)
+                  except logs.exceptions.ResourceNotFoundException:
+                      print(f"  already gone: {name}")
+                      deleted += 1
+                      continue
+                  except Exception as error:  # a refusal is a result, not a crash
+                      code = type(error).__name__
+                      print(f"  REFUSED {name}: {code} {error}")
+                      failed.append(f"{name}:{code}")
+                      continue
+                  if gone(logs, name):
+                      print(f"  deleted {name}")
+                      deleted += 1
+                  else:
+                      print(f"  delete returned but {name} is still present")
+                      present.append(name)
+
+              detail = f"listed {len(listed)}, selected {len(targets)}, deleted {deleted}"
+              if failed:
+                  detail += f", refused {len(failed)} ({'; '.join(failed[:3])})"
+              if present:
+                  detail += f", still present {len(present)}"
+              if ran_out:
+                  detail += ", stopped early on the clock"
+              return {"Swept": str(deleted), "Detail": detail}
+
+
+          def handler(event, context):
+              """Sweep on every lifecycle event, and signal SUCCESS whatever happens."""
+              request = str(event.get("RequestType", "None"))
+              print(f"RequestType {request}")
+              data = {"Swept": "0", "Detail": "not attempted"}
+              try:
+                  data = sweep(event, context)
+              except Exception as error:  # see the module docstring
+                  data = {"Swept": "0", "Detail": f"{type(error).__name__}: {str(error)[:300]}"}
+                  print(f"sweep failed, reporting SUCCESS anyway: {data['Detail']}")
+              finally:
+                  respond(event, "SUCCESS", f"{request}: {data['Detail']}", data)
+              return data
+
+  # What makes any of this run. CloudFormation invokes LabSweepFunction with
+  # RequestType Create now, Update on a template change, and Delete when the
+  # stack goes away, which is the signal the design rests on. DependsOn the policy
+  # rather than the function, because a Lambda can be created before its role has
+  # any permissions but cannot usefully be invoked that way: without this the
+  # sweep would race the grant and report a denial that means nothing.
+  LabSweepOnDelete:
+    Type: AWS::CloudFormation::CustomResource
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - LabSweepRolePolicy
+    Properties:
+      ServiceToken: !GetAtt LabSweepFunction.Arn
+
+Outputs:
+  # The GetAtt outputs are the evidence. A GetAtt only resolves after the service
+  # has really created the resource and returned its attributes, so a stack that
+  # reaches CREATE_COMPLETE with these values populated proves creation rather
+  # than echoing the inputs back.
+  BucketName:
+    Description: Name of the S3 bucket created for this student session
+    Value: !Ref LabBucket
+
+  BucketArn:
+    Description: ARN of the bucket, returned by S3 after creation
+    Value: !GetAtt LabBucket.Arn
+
+  BucketRegionalDomainName:
+    Description: >-
+      Regional endpoint S3 assigned to the bucket. Present only once the bucket
+      exists, and it names the region the lab actually ran in.
+    Value: !GetAtt LabBucket.RegionalDomainName
+
+  LogGroupArn:
+    Description: >-
+      ARN of the CloudWatch Logs group, returned by CloudWatch Logs after
+      creation. Contains the student account ID.
+    Value: !GetAtt LabLogGroup.Arn
+
+  ParameterName:
+    Description: Parameter Store path holding the smoke test marker
+    Value: !Ref LabParameter
+
+  ConsoleLink:
+    Description: Direct link to this bucket in the S3 console
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/s3/buckets/${LabBucket}?region=${AWS::Region}"
+
+  # The sweep's own evidence. A GetAtt on LabSweepOnDelete reads a key out of the
+  # Data the function sent back, so a populated value is proof CloudFormation
+  # invoked a custom resource in this account, ran it, and heard an answer. The
+  # handler returns both keys on every path, including the one where the sweep
+  # crashed, so neither output can fail the stack for a missing attribute.
+  SweepRoleArn:
+    Description: Sweep execution role. Present only if the deployer may
+      iam:CreateRole.
+    Value: !GetAtt LabSweepRole.Arn
+
+  SweepFunctionArn:
+    Description: Sweep function. Present only if the deployer may
+      lambda:CreateFunction and iam:PassRole on the sweep role.
+    Value: !GetAtt LabSweepFunction.Arn
+
+  SweepDeletedOnCreate:
+    Description: Log groups the Create-time sweep deleted. Expected 0 in a freshly
+      rotated account, which still proves the invocation.
+    Value: !GetAtt LabSweepOnDelete.Swept
+
+  SweepReportOnCreate:
+    Description: What the Create-time sweep listed, selected, deleted and was
+      refused. A logs:DeleteLogGroup denial shows up here, reported not raised.
+    Value: !GetAtt LabSweepOnDelete.Detail
+
+  SweepLogGroup:
+    Description: Where to read the Delete-time sweep report, which no stack output
+      can carry because the stack is gone by then. Composed rather than returned,
+      because Lambda creates this group lazily and CloudFormation does not own it.
+    Value: !Sub "/aws/lambda/${LabSweepFunction}"

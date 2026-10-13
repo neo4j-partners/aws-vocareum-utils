@@ -1,0 +1,581 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Vocareum lab permission probe for the TEMPLATE DEPLOYER principal. Runs any
+  list of AWS API calls inside the student account and reports which ones the
+  organization ceiling permits, plus the raw AWS error for the ones it
+  refuses. A Lambda-backed custom resource catches every error, so the stack
+  reaches CREATE_COMPLETE and the diagnosis is readable as Outputs instead of
+  as a rollback message. Read Summary and FirstFailureReason first.
+
+# This is the deployer-side half of the Phase 0 instrument. The other half
+# is vocareum-probe, which measures the student session role.
+# Both use the same verdict vocabulary, so a result means the same thing
+# whichever principal produced it. Neither can answer for the other.
+#
+# Deploy by uploading this file to /voc/private/lab.template in Configure
+# Workspace. The filename must be exactly lab.template, so keep the real
+# lab.template elsewhere while this probe is in place.
+# vocareum-upload does the upload and verifies the bytes arrived
+# intact.
+#
+# What this instrument can and cannot conclude:
+#
+#   - The probes run as the Lambda execution role this template creates, NOT
+#     as vocareum/${LAB_DEPLOYER_ROLE} itself. That role's own policy is not
+#     readable from inside the account.
+#   - To stop the role's own policy from being the thing under test, the role
+#     is granted Action "*". Anything that still fails therefore failed at the
+#     organization ceiling or at the service, not at the role. That is the
+#     whole point: grant everything, and whatever remains refused is the
+#     ceiling. A grant of "*" is bounded by the SCP above it and disappears
+#     when the stack is deleted.
+#   - An SCP_DENY verdict is conclusive for every principal in the account,
+#     the student session role included, because an SCP is a ceiling rather
+#     than a grant.
+#   - An OK verdict is NOT conclusive for the student session role. It proves
+#     the ceiling allows the action. Whether Vocareum's own session-role
+#     policy also allows it is a separate question, and vocareum-probe
+#     is what answers it.
+#   - If the stack fails on ProbeFunctionRole or ProbeFunction, the ceiling
+#     blocks IAM or Lambda and every other question is still open. Set
+#     ExecutionRoleArn to an existing role to drop the iam:CreateRole
+#     dependency, then try again.
+#   - No AWS::Logs::LogGroup is declared on purpose. Lambda creates its log
+#     group lazily, so a logs deny costs the logs but still returns verdicts.
+#     Declaring the group would let a logs deny fail the whole stack. The
+#     price of that choice is that CloudFormation does not own the group and
+#     will not delete it. Deleting the stack leaves
+#     /aws/lambda/<generated-function-name> behind, so delete it by hand
+#     afterwards. Verified on a real deploy, not assumed.
+
+Parameters:
+  Probes:
+    Type: String
+    Description: >-
+      A JSON array of probe objects. Each needs "action" as an IAM action such
+      as bedrock:ListFoundationModels, and may carry "kwargs" for the API call
+      and "client" to override the boto3 client name. Keep the list short: a
+      CloudFormation custom resource response is capped at 4096 bytes in
+      total, and the template reports how many results it had to drop.
+    Default: >-
+      [{"action": "sts:GetCallerIdentity"},
+       {"action": "bedrock:ListFoundationModels"},
+       {"action": "lambda:ListFunctions"},
+       {"action": "iam:ListRoles"},
+       {"action": "dynamodb:ListTables"},
+       {"action": "ecr:DescribeRepositories"},
+       {"action": "codebuild:ListProjects"},
+       {"action": "bedrock-agentcore:ListMemories", "client": "bedrock-agentcore-control"}]
+
+  ExecutionRoleArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional ARN of an existing role for the probe function to assume. Leave
+      empty and the template creates one. Set it to an existing role, for
+      example the LabRole that Vocareum-hosted accounts commonly provide, if
+      the ceiling denies iam:CreateRole. The role must trust
+      lambda.amazonaws.com.
+
+Conditions:
+  # The single knob that lets the probe be retried without iam:CreateRole.
+  CreateExecutionRole: !Equals [!Ref ExecutionRoleArn, ""]
+
+Resources:
+  ProbeFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateExecutionRole
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: measure-the-ceiling
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Deliberately unscoped. A least-privilege role here would make
+              # the role's own policy the thing under test, and every denial
+              # would be ambiguous between "the org forbids it" and "this
+              # template forgot to allow it". Granting everything removes that
+              # ambiguity: what still fails is the ceiling. The SCP above this
+              # account still applies, and the role dies with the stack.
+              - Sid: GrantEverythingSoTheCeilingIsWhatFails
+                Effect: Allow
+                Action: "*"
+                Resource: "*"
+      Tags:
+        - Key: Purpose
+          Value: vocareum-permission-probe
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  ProbeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      # No FunctionName is set, so CloudFormation generates one. A fixed name
+      # would collide if a previous lab session failed to delete its stack,
+      # and Vocareum resets labs often.
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !If
+        - CreateExecutionRole
+        - !GetAtt ProbeFunctionRole.Arn
+        - !Ref ExecutionRoleArn
+      # A Lambda that times out sends no response at all and leaves the stack
+      # in CREATE_IN_PROGRESS for an hour, so the budget is generous relative
+      # to a list of short API calls.
+      Timeout: 300
+      MemorySize: 512
+      # Inline ZipFile only. The Vocareum flow has no build or upload step, so
+      # an S3 artifact could never be staged.
+      Code:
+        ZipFile: |
+          """Probe a list of AWS API calls and classify every outcome.
+
+          Every probe is caught and classified. The handler always reports
+          SUCCESS to CloudFormation and puts the diagnosis in the response
+          data, so the stack completes and the verdicts are readable as stack
+          Outputs instead of as a rollback message.
+
+          The verdict vocabulary is shared verbatim with
+          vocareum-probe. Changing one without the other makes results
+          from the two principals stop being comparable, which is the only
+          reason to run both.
+          """
+
+          import json
+          import re
+          from typing import Any
+
+          import boto3
+          import cfnresponse
+          from botocore.config import Config
+          from botocore.exceptions import BotoCoreError, ClientError
+
+          # Short timeouts and few retries. A long probe list should not stall
+          # on one hung socket, because a Lambda timeout means no response is
+          # sent at all.
+          BOTO_CONFIG = Config(
+              connect_timeout=5,
+              read_timeout=20,
+              retries={"max_attempts": 2, "mode": "standard"},
+          )
+
+          # A custom resource response body is capped at 4096 bytes in total,
+          # so every field is truncated before it goes in and the caller is
+          # told how much was dropped.
+          MAX_SUMMARY = 2400
+          MAX_REASON = 900
+          # Room held back so the "results were dropped" notice survives the
+          # truncation it is reporting on.
+          NOTICE_ROOM = 130
+
+          # Ordered candidates, not one name. One IAM service prefix can be
+          # served by more than one boto3 client, and which is right depends on
+          # the operation. AgentCore management is on bedrock-agentcore-control
+          # and InvokeAgentRuntime is on the bedrock-agentcore data plane. The
+          # two share no operation name, so first match cannot pick wrong.
+          # Kept identical to CLIENT_CANDIDATES in vocareum_tools/probe.py.
+          CLIENT_CANDIDATES = {
+              "bedrock-agentcore": ("bedrock-agentcore-control", "bedrock-agentcore"),
+              "elasticloadbalancing": ("elbv2",),
+          }
+
+          TRACKER_STATUS = {
+              "OK": "Allowed",
+              "ALLOWED_NOT_FOUND": "Allowed",
+              "THROTTLED": "Allowed",
+              "QUOTA_EXCEEDED": "Allowed",
+              "MODEL_ACCESS_NOT_GRANTED": "Allowed",
+              "MODEL_LEGACY_INACTIVE": "Allowed",
+              "MODEL_USE_CASE_NOT_SUBMITTED": "Allowed",
+              "MODEL_NOT_IN_REGION": "Allowed",
+              "SCP_DENY": "Denied (SCP)",
+              "RCP_DENY": "Denied (SCP)",
+              "IAM_DENY": "Denied (IAM)",
+              "ACCESS_DENIED_UNCLASSIFIED": "Denied (IAM)",
+              "OPT_IN_REQUIRED": "Blocked",
+          }
+
+          DENIAL_CODES = {
+              "AccessDenied",
+              "AccessDeniedException",
+              "AuthorizationError",
+              "AccessDeniedError",
+          }
+
+          NOT_FOUND_CODES = {
+              "ResourceNotFoundException",
+              "ResourceNotFound",
+              "NoSuchEntity",
+              "NoSuchEntityException",
+              "NoSuchBucket",
+              "NoSuchKey",
+              "EntityNotFoundException",
+              "NotFoundException",
+          }
+
+          # Request-shape validation is NOT evidence of authorization. A
+          # malformed or unknown parameter is rejected before the
+          # authorization check ever runs, measured against a principal
+          # holding AdministratorAccess. Treating these as Allowed would
+          # manufacture permissions that were never tested.
+          INCONCLUSIVE_CODES = {
+              "ValidationException",
+              "ValidationError",
+              "InvalidParameterValue",
+              "InvalidParameterValueException",
+              "InvalidParameterCombination",
+              "MissingParameter",
+          }
+
+          MAPPED_CODES = {
+              "ThrottlingException": "THROTTLED",
+              "Throttling": "THROTTLED",
+              "TooManyRequestsException": "THROTTLED",
+              "RequestLimitExceeded": "THROTTLED",
+              "ServiceQuotaExceededException": "QUOTA_EXCEEDED",
+              "LimitExceededException": "QUOTA_EXCEEDED",
+              "LimitExceeded": "QUOTA_EXCEEDED",
+              "OptInRequired": "OPT_IN_REQUIRED",
+              "SubscriptionRequiredException": "OPT_IN_REQUIRED",
+              "UnrecognizedClientException": "CREDENTIALS_BROKEN",
+              "InvalidClientTokenId": "CREDENTIALS_BROKEN",
+              "InvalidSignatureException": "CREDENTIALS_BROKEN",
+              "ExpiredToken": "CREDENTIALS_BROKEN",
+              "ExpiredTokenException": "CREDENTIALS_BROKEN",
+          }
+
+          # AWS names the refused action in the message body. Reading it back
+          # is how a denial for a dependency gets told apart from a denial for
+          # the action actually being probed. The action half admits ``*``
+          # because a policy denial can name a wildcard. Kept identical to
+          # vocareum_tools/aws.py, so both harnesses read a denial the same way.
+          DENIED_ACTION = re.compile(
+              r"not authorized to perform:?\s*([A-Za-z0-9-]+):([A-Za-z0-9_*]+)"
+          )
+
+
+          def clip(text: Any, limit: int) -> str:
+              """Collapse whitespace and trim, marking any truncation."""
+              collapsed = " ".join(str(text).split())
+              if len(collapsed) <= limit:
+                  return collapsed
+              return collapsed[: limit - 3] + "..."
+
+
+          def names_other_action(message: str, probed: str) -> bool:
+              """Report whether a denial names a single action other than this one.
+
+              A wildcard is not a different action. A policy that refuses
+              ``bedrock:*`` refuses the action being measured along with
+              everything else, so the denial belongs to this measurement and
+              has to be classified as a denial rather than set aside as
+              somebody else's.
+              """
+              match = DENIED_ACTION.search(message)
+              if match is None or not probed:
+                  return False
+              named = f"{match.group(1)}:{match.group(2)}"
+              if "*" in named:
+                  return False
+              return named.lower() != probed.lower()
+
+
+          def method_name(operation: str) -> str:
+              """Convert an IAM action name to its boto3 method name."""
+              step = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", operation)
+              return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", step).lower()
+
+
+          def classify(error: ClientError, probed: str) -> tuple[str, str]:
+              """Map a ClientError onto a verdict and its raw message.
+
+              The order inside the denial branch is load bearing. AWS names
+              the blocking policy type in the message body, and that string is
+              the only reliable way to tell an organization ceiling apart from
+              a gap in the account's own IAM. Both arrive as AccessDenied.
+              """
+              info = error.response.get("Error", {})
+              code = str(info.get("Code", "Unknown"))
+              message = str(info.get("Message", str(error)))
+              lowered = message.lower()
+
+              if code in DENIAL_CODES:
+                  # A denial naming a different action says nothing about this
+                  # one. Checked only within a denial, because outside one the
+                  # same wording can appear in text that is not a refusal.
+                  if names_other_action(message, probed):
+                      return "DEPENDENCY_DENIED", message
+                  if "service control policy" in lowered:
+                      return "SCP_DENY", message
+                  if "resource control policy" in lowered:
+                      return "RCP_DENY", message
+                  if "not authorized to perform" in lowered:
+                      return "IAM_DENY", message
+                  if "access to the model" in lowered:
+                      return "MODEL_ACCESS_NOT_GRANTED", message
+                  return "ACCESS_DENIED_UNCLASSIFIED", message
+
+              # Bedrock also uses ResourceNotFoundException when a legacy
+              # model is unavailable to an account that did not use it
+              # recently. That is a lifecycle block, not a Region problem.
+              if code == "ResourceNotFoundException" and (
+                  "marked by provider as legacy" in lowered
+                  or ("legacy" in lowered and "last 30 days" in lowered)
+              ):
+                  return "MODEL_LEGACY_INACTIVE", message
+              if (
+                  code == "ResourceNotFoundException"
+                  and "use case details" in lowered
+              ):
+                  return "MODEL_USE_CASE_NOT_SUBMITTED", message
+
+              # Bedrock reuses ResourceNotFoundException to mean "that model
+              # is not in this region", which is worth telling apart from an
+              # ordinary missing resource even though both land on Allowed.
+              # lab-bedrock.template records the same mapping.
+              #
+              # The colon is load-bearing. Matching the bare prefix also
+              # caught bedrock-agentcore, which has no models in it, so every
+              # absent gateway, runtime, or memory was reported as a model
+              # missing from this Region.
+              if code == "ResourceNotFoundException" and probed.startswith(
+                  "bedrock:"
+              ):
+                  return "MODEL_NOT_IN_REGION", message
+              if code in NOT_FOUND_CODES:
+                  return "ALLOWED_NOT_FOUND", message
+              if code in INCONCLUSIVE_CODES:
+                  return "INCONCLUSIVE_BAD_INPUT", message
+              return MAPPED_CODES.get(code, "UNCLASSIFIED"), message
+
+
+          def run_probe(region: str, probe: dict[str, Any]) -> dict[str, str]:
+              """Run one probe and classify whatever comes back."""
+              action = str(probe.get("action", ""))
+              if ":" not in action:
+                  return {
+                      "action": action or "(unnamed)",
+                      "verdict": "UNKNOWN_ACTION",
+                      "detail": "Not an IAM action. Write it as service:Action.",
+                  }
+
+              service, operation = action.split(":", 1)
+              pinned = probe.get("client")
+              candidates = (
+                  (pinned,) if pinned else CLIENT_CANDIDATES.get(service, (service,))
+              )
+
+              wanted = method_name(operation)
+              method = None
+              unbuildable = []
+              for client_name in candidates:
+                  try:
+                      client = boto3.client(
+                          client_name, region_name=region, config=BOTO_CONFIG
+                      )
+                  except Exception as error:  # noqa: BLE001
+                      unbuildable.append(f"no boto3 client named {client_name}: {error}")
+                      continue
+                  method = getattr(client, wanted, None)
+                  if method is not None:
+                      break
+
+              if method is None:
+                  detail = f"no client among {', '.join(candidates)} has {wanted}"
+                  if unbuildable:
+                      detail = f"{detail}; {'; '.join(unbuildable)}"
+                  return {
+                      "action": action,
+                      "verdict": "UNKNOWN_ACTION",
+                      "detail": detail,
+                  }
+
+              try:
+                  method(**probe.get("kwargs", {}))
+              except ClientError as error:
+                  verdict, message = classify(error, action)
+                  return {
+                      "action": action,
+                      "verdict": verdict,
+                      "detail": message,
+                  }
+              except BotoCoreError as error:
+                  return {
+                      "action": action,
+                      "verdict": "ENDPOINT_UNREACHABLE",
+                      "detail": str(error),
+                  }
+              return {"action": action, "verdict": "OK", "detail": "call succeeded"}
+
+
+          def probed_principal(region: str) -> str:
+              """Report which principal the probes actually ran as."""
+              try:
+                  who = boto3.client(
+                      "sts", region_name=region, config=BOTO_CONFIG
+                  ).get_caller_identity()
+              except (ClientError, BotoCoreError) as error:
+                  return f"unknown: {error}"
+              return str(who.get("Arn", "unknown"))
+
+
+          def run_all(region: str, probes: list[dict[str, Any]]) -> dict[str, str]:
+              """Run every probe and fold the results into stack outputs."""
+              results = [run_probe(region, probe) for probe in probes]
+
+              lines = []
+              for item in results:
+                  status = TRACKER_STATUS.get(item["verdict"], "Untested")
+                  lines.append(f"{item['action']}={item['verdict']}[{status}]")
+
+              summary = " ".join(lines)
+              dropped = 0
+              if len(summary) > MAX_SUMMARY:
+                  # Drop down to a budget that leaves room for the notice
+                  # itself, otherwise the final clip eats the very sentence
+                  # that admits results went missing and the output reads as
+                  # if everything was covered.
+                  while lines and len(" ".join(lines)) > MAX_SUMMARY - NOTICE_ROOM:
+                      lines.pop()
+                      dropped += 1
+                  summary = " ".join(lines) + (
+                      f" ...{dropped} more result(s) dropped to fit the 4096 "
+                      "byte response cap. The log stream has all of them."
+                  )
+
+              denied = [
+                  item
+                  for item in results
+                  if TRACKER_STATUS.get(item["verdict"], "Untested").startswith(
+                      "Denied"
+                  )
+              ]
+              first = denied[0] if denied else None
+
+              counts: dict[str, int] = {}
+              for item in results:
+                  status = TRACKER_STATUS.get(item["verdict"], "Untested")
+                  counts[status] = counts.get(status, 0) + 1
+
+              return {
+                  "Summary": clip(summary, MAX_SUMMARY),
+                  "Counts": " ".join(f"{k}={v}" for k, v in sorted(counts.items())),
+                  "ProbeCount": str(len(results)),
+                  "FirstFailureAction": first["action"] if first else "none",
+                  "FirstFailureReason": (
+                      clip(first["detail"], MAX_REASON) if first else "No denials."
+                  ),
+                  "ProbedPrincipal": clip(probed_principal(region), 300),
+                  "Region": region,
+              }
+
+
+          def handler(event: dict[str, Any], context: Any) -> None:
+              """Run the probes and always answer CloudFormation."""
+              print(json.dumps({"RequestType": event.get("RequestType")}))
+              data: dict[str, str] = {}
+              try:
+                  if event.get("RequestType") == "Delete":
+                      cfnresponse.send(
+                          event, context, cfnresponse.SUCCESS, {},
+                          physicalResourceId="permission-probe",
+                      )
+                      return
+                  props = event.get("ResourceProperties", {})
+                  probes = json.loads(props.get("Probes", "[]"))
+                  if not isinstance(probes, list):
+                      raise ValueError("Probes must be a JSON array.")
+                  data = run_all(props["Region"], probes)
+                  # The log stream carries every result untruncated, which is
+                  # the escape hatch when the response cap drops some.
+                  print(json.dumps({"probes": probes}))
+                  print(json.dumps(data))
+              except Exception as error:  # noqa: BLE001
+                  # Deliberate catch-all, and the one place a broad except is
+                  # correct here. Anything escaping this frame would leave
+                  # CloudFormation waiting an hour for a response that never
+                  # arrives, which is the exact failure mode this template
+                  # exists to avoid.
+                  data = {
+                      "Summary": "PROBE_ERROR",
+                      "Counts": "",
+                      "ProbeCount": "0",
+                      "FirstFailureAction": "probe harness",
+                      "FirstFailureReason": clip(
+                          f"{type(error).__name__}: {error}", MAX_REASON
+                      ),
+                      "ProbedPrincipal": "unknown",
+                      "Region": str(
+                          event.get("ResourceProperties", {}).get("Region", "")
+                      ),
+                  }
+              cfnresponse.send(
+                  event, context, cfnresponse.SUCCESS, data,
+                  physicalResourceId="permission-probe",
+              )
+      Tags:
+        - Key: Purpose
+          Value: vocareum-permission-probe
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  PermissionProbe:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ProbeFunction.Arn
+      # Passed as properties rather than read from the environment so that a
+      # stack update with a different probe list re-runs the probes.
+      Region: !Ref AWS::Region
+      Probes: !Ref Probes
+
+Outputs:
+  Summary:
+    Description: >-
+      One entry per probe as action=VERDICT[Status]. Status is the value to
+      copy into the ceiling table in docs/permissions.md.
+    Value: !GetAtt PermissionProbe.Summary
+
+  Counts:
+    Description: How many probes landed in each tracker Status
+    Value: !GetAtt PermissionProbe.Counts
+
+  ProbeCount:
+    Description: How many probes ran
+    Value: !GetAtt PermissionProbe.ProbeCount
+
+  FirstFailureAction:
+    Description: The first probe that came back denied, or none
+    Value: !GetAtt PermissionProbe.FirstFailureAction
+
+  FirstFailureReason:
+    Description: >-
+      Raw AWS error message behind the first denial. An SCP deny names the
+      offending policy id here, which is what Vocareum support will ask for.
+    Value: !GetAtt PermissionProbe.FirstFailureReason
+
+  ProbedPrincipal:
+    Description: >-
+      The role the probes ran as. This is the probe function's execution role,
+      not vocareum/${LAB_DEPLOYER_ROLE} and not the student session role. An
+      SCP deny applies to every principal in the account and is conclusive. An
+      OK proves the org ceiling allows the action, and nothing more.
+    Value: !GetAtt PermissionProbe.ProbedPrincipal
+
+  Region:
+    Description: The region the probes ran in
+    Value: !GetAtt PermissionProbe.Region
+
+  LogsLink:
+    Description: >-
+      CloudWatch log group for the probe function. Every result is written
+      there untruncated, which is where to look when the 4096 byte response
+      cap drops some.
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#logsV2:log-groups/log-group/$252Faws$252Flambda$252F${ProbeFunction}
