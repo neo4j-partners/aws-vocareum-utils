@@ -78,8 +78,9 @@ def url() -> str:
 
 
 def test_the_notebook_installs_from_the_public_workshop_repository(url: str) -> None:
-    """`aws-vocareum` is private and answers the archive endpoint with 404, not
-    403, so an install pointed here fails in a way that names nothing."""
+    """The notebook installs only `workshop_lab`, from the repository students
+    already use. An install pointed anywhere else fails in a way that names
+    nothing."""
     match = ARCHIVE.fullmatch(url)
     assert match is not None
     assert (match["owner"], match["repo"], match["subdir"]) == (OWNER, REPO, SUBDIR)

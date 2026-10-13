@@ -92,9 +92,8 @@ COURSE_ASSET_DIR=../neo4j-hotel-booking-agent-workshop/environment/vocareum
   git-ignored, so this line has to be written once per checkout.
   `course.env.example` documents it.
 - **The dependency runs one way.** This repository reads the course repository.
-  The course repository depends on nothing here. `aws-vocareum` is private and
-  the course repository is public, so a dependency in the other direction would
-  fail for everyone who clones it.
+  The course repository depends on nothing here, so it works for everyone who
+  clones it without this tooling.
 - **The directory has to agree that it belongs to the course.** Every lookup
   checks the `course_key` in the `course.json` it lands in. Exporting
   `COURSE_ASSET_DIR` in a shell sets it for every course, not one, and `upload`

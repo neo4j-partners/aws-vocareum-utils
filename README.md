@@ -29,7 +29,7 @@ The `graphrag` course keeps its files in its own public repository, `neo4j-hotel
 - **Starter code:** The student package holds `CONFIG.txt`, `README.md`, `notebooks/`, and `environment/verify.py`. The release builds it from one pinned commit with `git archive`.
 - **Pin:** The pinned commit appears in two places: `startercode.commit` in `course.json` and `Metadata.SourceCommit` in `lab.template`. `environment/vocareum/bump_pin.py` updates both at once. The release refuses to run when they differ.
 - **Release runbook:** `environment/vocareum/quick-release-workshop.md` lists every step from commit to live check.
-- **One-way link:** The workshop repository depends on nothing here. It is public, so it cannot install this private repository.
+- **One-way link:** The workshop repository depends on nothing here. Students clone and run it without this tooling.
 
 ## How a course goes live
 
@@ -376,7 +376,7 @@ Every tool takes `--course NAME`, which layers `courses/NAME.env` over the root 
 | `uv run vocareum-restart-student` | Safely restarts one student's cloud session by roster email; dry run by default and requires `--yes` because it gives up the student's AWS account, while preserving their workarea |
 | `scripts/sync_workshop_lab.py` | Publishes `src/workshop_lab/` into the public workshop repository's `staging/`, which is where the student notebook installs it from. `--check` exits 1 when the published copy is stale |
 | `src/vocareum_tools/` | Installable Python package behind every `vocareum-*` command, including shared configuration, API, transaction, redaction, and phase-runner code |
-| `src/workshop_lab/` | The classes the student notebook runs on: the credential, account, and region guards, the check harness, the resource naming, the IAM execution roles, the container build source, the CodeBuild build, the registry copy, and the Neo4j probe. Source of truth for a package the notebook installs from GitHub, because a helper file shipped beside a notebook does not reach a Vocareum workspace and a private repository cannot serve one |
+| `src/workshop_lab/` | The classes the student notebook runs on: the credential, account, and region guards, the check harness, the resource naming, the IAM execution roles, the container build source, the CodeBuild build, the registry copy, and the Neo4j probe. Source of truth for a package the notebook installs from GitHub, because a helper file shipped beside a notebook does not reach a Vocareum workspace. The installable copy is published to the workshop repository |
 | `tests/management/` | Focused offline tests for course definitions, inspection, scaffolding, release, rollback, and the supporting management tools |
 | `tests/runtime/` | Offline tests for the student-facing `workshop_lab` package and notebook runtime contract |
 | `pyproject.toml` | Python dependencies, command entry points, and Ruff/pytest configuration |

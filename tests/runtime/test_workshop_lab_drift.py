@@ -1,9 +1,8 @@
 """Hold the published copy of `workshop_lab` to `src/workshop_lab/`.
 
 The lab notebook installs its helpers with pip from the public workshop
-repository, because this one is private and a private repository answers the
-archive endpoint with 404. That leaves one package in two repositories, and a
-hand-kept copy drifts.
+repository, which students already use. That leaves one package in two
+repositories, and a hand-kept copy drifts.
 
 `scripts/sync_workshop_lab.py` writes one into the other. This holds it there.
 

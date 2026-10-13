@@ -111,5 +111,5 @@ The demo shows an agent running the lifecycle. Each step is safe to run on scree
 ## Speaker notes
 
 - **Hide real identifiers:** Do not show `.env`, `courses/*.env`, or `support/`. They hold real account, organization, and policy identifiers. Use placeholders on slides.
-- **Mind the repository access:** This repository is private. Point attendees to the public workshop repository, or decide before the webinar whether to open this one.
+- **Share both repositories:** Point attendees to this repository for the tooling. Point them to the public workshop repository for the course itself.
 - **Plan the live lab:** Starting a lab spends one launch from the budget. Open a session before the webinar, and use `--no-start` during the demo.

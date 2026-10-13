@@ -6,9 +6,11 @@
 
 The lab notebook installs its utility classes with pip from a public GitHub
 archive, because helper files shipped beside a notebook do not reach a Vocareum
-workspace (measured 2026-08-06) and a raw fetch does. `aws-vocareum` is private,
-and a private repository answers both the raw and the archive endpoint with 404
-rather than 403, so the copy the notebook installs cannot live here.
+workspace (measured 2026-08-06) and a raw fetch does. The notebook installs from
+the workshop repository, which students already use, and needs only
+`workshop_lab`, not the instructor tooling. This code started in a private
+repository, which answered both the raw and the archive endpoint with 404 rather
+than 403.
 
 That leaves one package in two repositories, and a hand-kept copy drifts. This
 writes one into the other, the same shape as `lab-probe.template`'s inline

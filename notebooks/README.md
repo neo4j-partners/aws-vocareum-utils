@@ -52,7 +52,7 @@ The steps run in this order:
 
 Vocareum's documentation says everything in `/voc/startercode` is copied into each student's `/voc/work`, and Jupyter puts the notebook's own directory on `sys.path`, so a sibling module should import. **Measured 2026-08-06 in a live session: it does not.** Measured the same day in the same session: the lab account reaches public GitHub over HTTPS and pip installs from it. So the helpers are packaged and installed.
 
-**The package cannot be installed from this repository.** `aws-vocareum` is private, and a private repository answers both `raw.githubusercontent.com` and the archive endpoint with **404, not 403**. From the client, a missing file and a private repository are indistinguishable. The public workshop repository hosts the installable copy.
+**The package is installed from the workshop repository, not this one.** Students already use the workshop repository, and the notebook needs only `workshop_lab`, not the instructor tooling. This code started in a private repository, which answered both `raw.githubusercontent.com` and the archive endpoint with **404, not 403**. From the client, a missing file and a private repository are indistinguishable.
 
 **`../src/workshop_lab/` is the source of truth, not the published copy.** `../scripts/sync_workshop_lab.py` publishes it into the workshop repository's `staging/`, and `../tests/runtime/test_workshop_lab_drift.py` fails while the two disagree. That test skips when the workshop repository is not checked out beside this one, so a skip there verifies nothing. Edit under `src/`, sync, then commit and push the workshop repository:
 

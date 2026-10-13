@@ -92,9 +92,10 @@ question -- which tag key casing counts, how a log group under the service's own
 path is matched, which S3 codes mean the bucket is not there -- and a
 disagreement there decides what gets deleted out of an account that is about to
 become unreachable. The shared module lives in ``workshop_lab`` and not here
-because ``workshop_lab`` is the package a student's notebook installs from a
-public repository, and this repository is private: an import the other way round
-would resolve on an instructor's machine and fail in every lab.
+because ``workshop_lab`` is the package a student's notebook installs, alone,
+from the workshop repository. This package is never installed in a lab, so an
+import the other way round would resolve on an instructor's machine and fail in
+every lab.
 
 What stays here is what only an instructor has. This module's ``NAME_PREFIXES``
 is the union across every generation of names that could still be sitting in a
