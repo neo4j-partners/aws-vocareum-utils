@@ -1,0 +1,9 @@
+= Letting Coding Agents Run a Vocareum Cloud Lab Course (Slides)
+
+++++
+<iframe src="../_attachments/slides/webinar-overview-slides.html"
+  style="width:100%;aspect-ratio:16/9;border:none;">
+</iframe>
+++++
+
+link:../_attachments/slides/webinar-overview-slides.html[Open full screen^] | xref:slides.adoc[All decks]

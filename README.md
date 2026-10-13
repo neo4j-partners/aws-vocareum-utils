@@ -1,8 +1,8 @@
-# aws-vocareum
+# Vocareum Utils
 
-CloudFormation and setup assets for the Neo4j AWS workshops that run on Vocareum.
+Vocareum Utils helps you run Neo4j workshops on Vocareum. Vocareum gives each student their own AWS account. When the student clicks Start Lab, Vocareum sets that account up for the lab. The tools here let a coding agent, such as Claude Code, handle the work around that. The agent can publish the course, check that each lab came up with the right permissions, and clean up when the class is over.
 
-Vocareum gives each student their own AWS account. When a student starts the lab, Vocareum runs a CloudFormation template in that account, so the environment can be built for them instead of assembled by hand during the session. That template is a file named `lab.template`, uploaded to `/voc/private/` in the instructor workspace.
+The webinar slide deck, [Letting coding agents run a Vocareum cloud lab course](https://neo4j-partners.github.io/aws-vocareum-utils/aws-vocareum-utils/1.0/_attachments/slides/webinar-overview-slides.html), gives an overview of the project.
 
 ## How this differs from vocareum-publisher
 
@@ -12,7 +12,7 @@ The right tool depends on what you need. If you want to publish course content f
 
 A course is a small set of files. CloudFormation sets up the AWS account, starter code gives the student their files, and a manifest says what a working lab holds.
 
-- **`lab.template`:** CloudFormation runs this template in the student's AWS account at Start Lab. It grants the permissions the notebooks need. It must stay at or under 51,200 bytes, because Vocareum sends it inline.
+- **`lab.template`:** CloudFormation runs this template in the student's AWS account at Start Lab. It grants the permissions the notebooks need. Vocareum reads it from `/voc/private/lab.template` in the instructor workspace, so the name must match exactly. It must stay at or under 51,200 bytes, because Vocareum sends it inline.
 - **Starter code:** These are the notebooks and setup files a student sees in their workspace. Vocareum copies them to `/voc/work` only the first time a student opens the lab.
 - **`course.json`:** This file names the course and its Vocareum settings. It lists the starter-code files and the commit they are built from. It also lists the name prefixes the cleanup sweep deletes.
 - **`expected.json`:** This file lists what a working lab must hold, such as the CloudFormation stack. `vocareum-expect` checks a live lab against it.

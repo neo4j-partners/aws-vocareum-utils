@@ -1,0 +1,29 @@
+= Vocareum Utils
+
+Tools that let coding agents build, test, publish, run, inspect, probe, and clean up Vocareum AWS cloud labs. With them, an agent can automate the whole lifecycle of building and running a course.
+
+The source lives in the public https://github.com/neo4j-partners/aws-vocareum-utils[aws-vocareum-utils^] repository.
+
+== Webinar: Letting Coding Agents Run a Vocareum Cloud Lab Course
+
+A joint webinar with Vocareum. It runs about 40 minutes, with about 10 minutes for questions.
+
+xref:slides/slides-webinar-overview.adoc[View the slides]
+
+=== Who It Is For
+
+* *Course authors:* Course authors build hands-on AWS labs on Vocareum. They want fewer surprises on launch day.
+* *Platform and DevOps teams:* These teams support many courses. They want each step to be repeatable and checkable.
+* *Teams using coding agents:* These teams want an agent such as Claude Code to do the operational work safely.
+
+=== What You Leave With
+
+* *A mental model:* Publishing content and operating a cloud lab are two different jobs. Both can be automated.
+* *A pattern for agent-safe tools:* Each tool previews by default and answers with an exit code. It refuses to report on the wrong account.
+* *A lifecycle you can copy:* Every step from an empty course to a finished cohort maps to one command.
+
+== Related Repositories
+
+* https://github.com/neo4j-partners/neo4j-hotel-booking-agent-workshop[neo4j-hotel-booking-agent-workshop^]: The AWS course itself, with its Vocareum assets.
+* https://github.com/neo4j-partners/databricks-neo4j-workshop[databricks-neo4j-workshop^]: The Neo4j and Databricks course.
+* https://github.com/neo4j-partners/dbx-vocareum[dbx-vocareum^]: The same lifecycle tools, for Databricks labs.

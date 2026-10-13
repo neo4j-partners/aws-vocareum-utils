@@ -1,0 +1,6 @@
+build/
+node_modules/
+
+# Produced by `npm run build:slides`, which the deploy workflow runs before
+# Antora. See build-slides.sh for why it is never committed.
+modules/ROOT/attachments/

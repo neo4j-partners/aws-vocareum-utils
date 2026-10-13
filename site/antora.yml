@@ -1,0 +1,12 @@
+name: aws-vocareum-utils
+title: Vocareum Utils
+version: '1.0'
+start_page: ROOT:index.adoc
+nav:
+- modules/ROOT/nav.adoc
+asciidoc:
+  attributes:
+    source-highlighter: highlight.js
+    icons: font
+    idprefix: ''
+    idseparator: '-'
