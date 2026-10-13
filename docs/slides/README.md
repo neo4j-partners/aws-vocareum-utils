@@ -7,7 +7,7 @@ Presentation decks for this repository, written in [Marp](https://marp.app/) Mar
 | File | What it is |
 | --- | --- |
 | `webinar-overview.md` | The webinar proposal: pitch, audience, takeaways, and the slide-by-slide outline. It is the source the deck was written from, not a deck. |
-| `webinar-overview-slides.md` | The webinar deck: Letting coding agents run a Vocareum cloud lab course. |
+| `webinar-overview-slides.md` | The webinar deck: Neo4j Courses on Vocareum. It covers how Neo4j hosts its courses on Vocareum and the tools built to run them. |
 
 ## Preview while editing
 

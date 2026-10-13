@@ -6,8 +6,8 @@ Every deck is embedded on its own page. Each page also carries an *Open full scr
 |===
 | Deck | Covers
 
-| xref:slides/slides-webinar-overview.adoc[Letting Coding Agents Run a Vocareum Cloud Lab Course]
-| The Neo4j courses on Vocareum, what makes a tool safe for an agent, the course lifecycle as commands, the Databricks counterpart, and the practices that came from failures
+| xref:slides/slides-webinar-overview.adoc[Neo4j Courses on Vocareum]
+| How Neo4j hosts its courses on Vocareum, AWS and Databricks labs compared, what makes a tool safe for an agent, the course lifecycle as commands, the Databricks counterpart, and the practices that came from failures
 |===
 
 Decks are built, not committed. `site/build-slides.sh` renders the Markdown sources in `docs/slides/` into HTML, and CI runs it before every publish.

@@ -1,3 +1,3 @@
 * xref:index.adoc[Overview]
 * xref:slides.adoc[Slide Decks]
-** xref:slides/slides-webinar-overview.adoc[Webinar: Letting Coding Agents Run a Course]
+** xref:slides/slides-webinar-overview.adoc[Webinar: Neo4j Courses on Vocareum]

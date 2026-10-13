@@ -2,8 +2,8 @@
 marp: true
 theme: default
 paginate: true
-title: Vocareum Utils
-description: Letting coding agents run a Vocareum cloud lab course
+title: Neo4j Courses on Vocareum
+description: Overview of Neo4j Courses on Vocareum and Built Utils
 ---
 
 <style>
@@ -70,22 +70,45 @@ section.dense pre {
 <!-- _class: lead -->
 <!-- _paginate: false -->
 
-# Vocareum Utils
+# Neo4j Courses on Vocareum
 
-<p class="subtitle">Letting coding agents run a Vocareum cloud lab course</p>
+<p class="subtitle">Overview of Neo4j Courses on Vocareum and Built Utils</p>
 
-**Ryan Knight**, Neo4j. Co-presented with **Vocareum**.
+**Ryan Knight**, Neo4j. 
 
-- **What it is:** Tools for coding agents
-- **What it covers:** Build, test, evaluate, run, and inspect courses
+Co-presented with **Vocareum**.
+
+- **Part 1:** How Neo4j hosts its cloud lab courses on Vocareum
+- **Part 2:** The tools we built so coding agents can run them
 
 <!--
-Vocareum Utils is a set of tools for coding agents. The tools build, test, evaluate, run, and inspect courses. They cover the full course lifecycle.
+This talk covers how Neo4j hosts its cloud lab courses on Vocareum. Then it covers the tools we built to run those courses. Coding agents use the tools to build, test, publish, run, and inspect each course.
 
 Before the webinar:
 - Hide real identifiers. Do not show .env, courses/*.env, or support/. They hold real account, organization, and policy identifiers. Use placeholders on slides.
 - Plan the live lab. Starting a lab spends one launch from the budget. Open a session before the webinar, and use --no-start during the demo.
 -->
+
+---
+
+## Two Parts: Hosting, Then Tooling
+
+1. **How we host courses on Vocareum:** The clouds, the courses, the platform
+2. **The tools we built:** Agents that build, run, and troubleshoot labs
+
+<!--
+The first part is about hosting. It covers which courses we run, on which clouds, and what Vocareum gives each student.
+
+The second part is about the tools. They let a coding agent do the operational work for each course, safely.
+-->
+
+---
+
+<!-- _class: lead -->
+
+# Part 1: How We Host Courses on Vocareum
+
+<p class="subtitle">The clouds, the courses, and what Vocareum provides</p>
 
 ---
 
@@ -107,7 +130,7 @@ A student clicks Start Lab and gets a working cloud environment. The cloud behin
 
 ---
 
-## Featured Course: Grounded AI Agents with Neo4j and AWS
+## Grounded AI Agents with Neo4j and AWS
 
 - **Students build:** A hotel booking agent on Bedrock AgentCore
 - **Neo4j holds:** Hotel knowledge, indexes, rules, reservations
@@ -130,7 +153,7 @@ The course and its Vocareum assets live in the public neo4j-hotel-booking-agent-
 
 ---
 
-## Coming Soon: Hands-On Workshop with Neo4j and Databricks
+## Hands-On Workshop with Neo4j and Databricks
 
 - **Students build:** A fleet agent over two databases
 - **Neo4j Aura:** Fleet relationships and maintenance manuals
@@ -186,6 +209,86 @@ The API covers publishing, sessions, rosters, and spend. That API is what makes 
 
 Add LMS integration, grading, analytics, and any other features Vocareum wants to show.
 -->
+
+---
+
+## How We Host a Course on Vocareum
+
+- **One course repository:** Content and Vocareum assets together
+- **One Vocareum part:** Lab type, session length, budget
+- **Setup at Start Lab:** CloudFormation on AWS, shell hooks on Databricks
+- **Neo4j in Aura:** Outside the lab, reached over Bolt
+- **A ship check:** Prove the lab came up before students do
+- **Cleanup at the end:** Nothing billable left behind
+
+<!--
+Every course follows the same pattern, whatever the cloud behind it.
+
+The course content and its Vocareum assets live together in one Git repository. The AWS hotel workshop keeps them under environment/vocareum. The Databricks workshop keeps its hooks in its own repository.
+
+Each course has one Vocareum part. The part sets the lab type, the session length, and the spend budget.
+
+At Start Lab, Vocareum runs the course's setup. On AWS that is a CloudFormation template. On Databricks it is a set of shell hooks.
+
+Neo4j runs in Aura, not inside the student's lab. The lab reaches it over the Bolt protocol.
+
+Before students arrive, we check that a lab actually came up with what it should hold. After the course, we make sure nothing billable is left running.
+-->
+
+---
+
+<!-- _class: dense -->
+
+## Why AWS Labs and Databricks Labs Differ
+
+| | **AWS lab** | **Databricks lab** |
+| --- | --- | --- |
+| Isolation | One AWS account per student | One user and group per student, in a shared workspace |
+| Setup | `lab.template`, declarative CloudFormation | Four shell scripts, run step by step |
+| Failure record | Stack events name each failed resource | An exit code and output in the Session log |
+| Rollback | CloudFormation rolls the stack back | None. A half-failed script leaves half a lab. |
+| Student credentials | Temporary AWS keys from the session | None. A token must be made in a live session. |
+| Denied access | `AccessDenied`, action named in the message | The object looks missing. "Not found" can mean "not allowed." |
+| Workspace | Assigned from an account pool | One per part. The account tier caps active workspaces. |
+
+---
+
+<!-- _class: dense -->
+
+## What a Databricks Lab Needs
+
+- **Account admin for Vocareum:** Creates workspaces, assigns users
+- **Hooks that report failures:** Non-zero exit, `error_code`, `message`
+- **Shared work once:** `workspace_init.sh` builds what everyone shares
+- **Student work per student:** `user_setup.sh`, the only required hook
+- **Idempotent setup:** `workspace_init.sh` may run more than once
+- **Careful cleanup:** `lab_end.sh` reads `stop` versus `terminate`
+- **The right workspace:** The one Vocareum created, not one built by hand
+- **A path to Neo4j:** Port 7687 open for Bolt to Aura
+
+<!--
+Vocareum's service principal holds the Databricks Account admin role. It uses that role to create workspaces and assign users.
+
+A failing script must exit non-zero and write an error_code and a message. Otherwise the lab fails with no stated reason.
+
+workspace_init.sh gets no user or group, so it builds only what every student shares. Per-student compute and notebooks go in user_setup.sh, the only required script. It also sets the page the student lands on.
+
+workspace_init.sh runs once per workspace, and one course can have several workspaces. Every step must be safe to run again.
+
+lab_end.sh must read the end-lab behavior. On stop, it keeps the student's work and removes only billable compute. On terminate, it can remove everything.
+
+The tools must point at the workspace Vocareum created. Results from any other workspace describe a lab no student enters.
+
+Vocareum opened port 7687 so clusters can reach Neo4j Aura over Bolt. Neo4j runs in Aura, not inside the workspace.
+-->
+
+---
+
+<!-- _class: lead -->
+
+# Part 2: The Tools We Built
+
+<p class="subtitle">Letting coding agents build, run, and troubleshoot each course</p>
 
 ---
 
@@ -545,53 +648,6 @@ The Databricks course pulls dbx-vocareum in as a git dev dependency. The AWS cou
 
 ---
 
-<!-- _class: dense -->
-
-## Why AWS Labs and Databricks Labs Differ
-
-| | **AWS lab** | **Databricks lab** |
-| --- | --- | --- |
-| Isolation | One AWS account per student | One user and group per student, in a shared workspace |
-| Setup | `lab.template`, declarative CloudFormation | Four shell scripts, run step by step |
-| Failure record | Stack events name each failed resource | An exit code and output in the Session log |
-| Rollback | CloudFormation rolls the stack back | None. A half-failed script leaves half a lab. |
-| Student credentials | Temporary AWS keys from the session | None. A token must be made in a live session. |
-| Denied access | `AccessDenied`, action named in the message | The object looks missing. "Not found" can mean "not allowed." |
-| Workspace | Assigned from an account pool | One per part. The account tier caps active workspaces. |
-
----
-
-<!-- _class: dense -->
-
-## What a Databricks Lab Needs
-
-- **Account admin for Vocareum:** Creates workspaces, assigns users
-- **Hooks that report failures:** Non-zero exit, `error_code`, `message`
-- **Shared work once:** `workspace_init.sh` builds what everyone shares
-- **Student work per student:** `user_setup.sh`, the only required hook
-- **Idempotent setup:** `workspace_init.sh` may run more than once
-- **Careful cleanup:** `lab_end.sh` reads `stop` versus `terminate`
-- **The right workspace:** The one Vocareum created, not one built by hand
-- **A path to Neo4j:** Port 7687 open for Bolt to Aura
-
-<!--
-Vocareum's service principal holds the Databricks Account admin role. It uses that role to create workspaces and assign users.
-
-A failing script must exit non-zero and write an error_code and a message. Otherwise the lab fails with no stated reason.
-
-workspace_init.sh gets no user or group, so it builds only what every student shares. Per-student compute and notebooks go in user_setup.sh, the only required script. It also sets the page the student lands on.
-
-workspace_init.sh runs once per workspace, and one course can have several workspaces. Every step must be safe to run again.
-
-lab_end.sh must read the end-lab behavior. On stop, it keeps the student's work and removes only billable compute. On terminate, it can remove everything.
-
-The tools must point at the workspace Vocareum created. Results from any other workspace describe a lab no student enters.
-
-Vocareum opened port 7687 so clusters can reach Neo4j Aura over Bolt. Neo4j runs in Aura, not inside the workspace.
--->
-
----
-
 ## Demo: An Agent Runs the Lifecycle
 
 1. **Offline self-test:** `uv run vocareum-probe --self-test`
@@ -621,6 +677,28 @@ Starting a lab spends one launch from the budget. Use the session opened before 
 - **Answer with exit codes:** Branch on results, not prose
 - **Write down why:** Reasoning in the code, so the agent keeps it
 - **Keep one source of truth:** One file per measured result
+
+---
+
+## Takeaways for Hosting Cloud Labs on Vocareum
+
+- **Isolation fits the cloud:** An account on AWS, a user on Databricks
+- **Setup is code:** A template or hooks, in the course repository
+- **Neo4j stays in Aura:** The same graph, whatever the cloud
+- **Measure, don't assume:** Permissions, readiness, leftovers
+- **Agents can run it:** With guards, previews, and exit codes
+
+<!--
+Vocareum gives every student an isolated lab. How that isolation works depends on the cloud. AWS gives each student an account. Databricks gives each student a user and group in a shared workspace.
+
+Setup lives in the course repository as code. On AWS it is a CloudFormation template. On Databricks it is a set of hooks.
+
+Neo4j runs in Aura on every course. The cloud around it changes.
+
+Every claim about a lab should come from a measurement. That covers what the account permits, whether the lab came up, and what was left behind.
+
+With the right guards, a coding agent can do this work for each course.
+-->
 
 ---
 

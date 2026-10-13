@@ -1,4 +1,4 @@
-= Letting Coding Agents Run a Vocareum Cloud Lab Course (Slides)
+= Neo4j Courses on Vocareum (Slides)
 
 ++++
 <iframe src="../_attachments/slides/webinar-overview-slides.html"

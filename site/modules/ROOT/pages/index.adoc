@@ -4,7 +4,7 @@ Tools that let coding agents build, test, publish, run, inspect, probe, and clea
 
 The source lives in the public https://github.com/neo4j-partners/aws-vocareum-utils[aws-vocareum-utils^] repository.
 
-== Webinar: Letting Coding Agents Run a Vocareum Cloud Lab Course
+== Webinar: Neo4j Courses on Vocareum
 
 A joint webinar with Vocareum. It runs about 40 minutes, with about 10 minutes for questions.
 

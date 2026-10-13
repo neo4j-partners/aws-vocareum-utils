@@ -1,4 +1,4 @@
-# Webinar proposal: Letting coding agents run a Vocareum cloud lab course
+# Webinar proposal: Neo4j Courses on Vocareum
 
 This is a proposed outline for a joint webinar with Vocareum. It is about 40 minutes long, with about 10 minutes for questions.
 
@@ -20,14 +20,14 @@ This repository gives coding agents the tools and scripts to build, test, publis
 
 ---
 
-## Slide 1: Title: Vocareum Utils Project
+## Slide 1: Title: Neo4j Courses on Vocareum
 
-**Letting coding agents run a Vocareum cloud lab course**
+**Overview of Neo4j Courses on Vocareum and Built Utils**
 
 Speaker: Ryan Knight. Co-presented with Vocareum.
 
-- **What it is:** Vocareum Utils is a set of tools for coding agents.
-- **What it covers:** The tools build, test, evaluate, run, and inspect courses. They cover the full course lifecycle.
+- **Part 1:** The talk covers how Neo4j hosts its cloud lab courses on Vocareum.
+- **Part 2:** The talk covers the tools we built so coding agents can run those courses.
 
 ## Slide 2: Neo4j + hyperscaler integration courses on Vocareum
 
