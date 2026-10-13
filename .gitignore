@@ -39,6 +39,9 @@ student.key
 aws-exports.js
 *token*.txt
 *secret*.txt
+.netrc
+.pypirc
+.npmrc
 
 # bedrock-key/create-key.py writes the live bearer token to bedrock-key.env,
 # which *.env above already covers. It writes it through tempfile.mkstemp in the
@@ -49,8 +52,6 @@ aws-exports.js
 .*.env.*
 
 # Local event-registration exports and generated Vocareum enrollment batches.
-signup/8_27 AWS Boston Workshop - Attendence.csv
-signup/aicamp neo4j bos0827 -2.csv
 signup/vocareum-enrollment-8_27/
 signup/*.csv
 !signup/enroll-students.csv
