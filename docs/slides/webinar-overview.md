@@ -188,13 +188,12 @@ Creating the course, assignment, and part is still done in the Vocareum web UI.
 - **A result for one is not a result for the other:** An action that works for the deployer can still fail in a notebook. The tools measure each role on its own, and the permission tracker keeps them in separate tables.
 - **Some limits come from above:** An organization policy can deny an action to both roles. No grant in the template can fix that.
 
-## Slide 16: Why cloud labs are hard to troubleshoot
+## Slide 16: Cloud lab challenges
 
-- **A failed lab hides its cause:** When the setup template fails, the student sees only that the lab did not start. The reason sits in a CloudFormation event the student cannot read.
-- **Two kinds of deny look the same:** An organization policy deny and a missing grant both arrive as `AccessDenied`. Only one of them can be fixed in the course.
-- **The account keeps moving:** Vocareum rotates a pool of accounts. A check against the old account reports on the wrong lab.
+- **Permissions:** The exact permissions a lab needs are hard to work out. Student accounts are locked down, so finding the right grants takes careful testing.
+- **Failed labs:** A failed lab is hard to troubleshoot. The cause sits inside the student's environment.
 
-The two principals from the previous slide add a fourth problem. A result for one role says nothing about the other.
+The two principals from the previous slide add one more challenge. A result for one role says nothing about the other.
 
 ## Slide 17: Tools for troubleshooting and probing
 

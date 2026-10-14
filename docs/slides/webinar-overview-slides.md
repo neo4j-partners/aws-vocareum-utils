@@ -382,29 +382,7 @@ That leaves Neo4j with the part only we can do: the course content, the setup co
 <!--
 That's how the courses are hosted. Now for running them.
 
-First, why we built tools at all. Then what a course is made of, then the tools themselves. The examples use the AWS course. The Databricks tools come at the end.
--->
-
----
-
-## Why We Need Vocareum Utils
-
-- **The goal:** An agent that builds, runs, tests, evaluates, and probes each course
-- **By hand, it's slow:** Many steps across Vocareum and the cloud
-- **Permissions must be measured:** Wide enough, and no wider
-- **Every step can be automated:** Vocareum API plus AWS APIs
-- **So we built tools:** Each one safe for an agent to drive
-
-<!--
-The core reason is agents. We wanted a coding agent to build a course, run it, test it, evaluate whether a lab came up, and probe what the account permits.
-
-Doing that by hand is slow, and it's easy to get wrong. Each course and each cohort means many steps across the Vocareum web UI, its API, and the cloud console.
-
-Permissions are the hardest part. What a lab account can do has to be measured, not assumed: wide enough for the labs, and no wider.
-
-Every step can be automated. Vocareum's API covers publishing, sessions, and rosters. AWS covers everything inside the account.
-
-So we built tools that an agent can drive safely. The rest of Part 2 shows them, starting with what a course is made of.
+First, what it takes to build a course. Then why we built tools, and the tools themselves. The examples use the AWS course. The Databricks tools come at the end.
 -->
 
 ---
@@ -442,6 +420,52 @@ The part sets the lab type, such as JupyterLab or VS Code, the session length, a
 
 <!-- _class: dense -->
 
+## Two Principals in Every Student Account
+
+![w:1100](images/two-principals.svg)
+
+- **A result for one is not a result for the other:** Measure each role on its own
+
+<!--
+The dashed box is one student's AWS account. Every student gets their own, and both roles live inside it.
+
+On the left is the deployer role. Vocareum assumes it at Start Lab to run lab.template through CloudFormation. It needs rights to create every resource and every grant in the template.
+
+The arrow is how the two roles connect. The template attaches RolePolicy grants to the student session role. For the hotel workshop, that is three grants: Bedrock, AgentCore, and the workshop's own IAM roles.
+
+On the right is the student session role. The notebook code runs as this role. It holds only what the template granted it.
+
+So an action that works for the deployer can still fail in a notebook. The tools measure each role on its own, and the permission tracker keeps them in separate tables.
+
+The red bar along the bottom is the organization's service control policies. They apply to both roles. An SCP deny can't be lifted by any grant in the template, or by anything else inside the account.
+-->
+
+---
+
+## Why We Need Vocareum Utils
+
+- **The goal:** An agent that builds, runs, tests, evaluates, and probes each course
+- **By hand, it's slow:** Many steps across Vocareum and the cloud
+- **Permissions must be measured:** Wide enough, and no wider
+- **Every step can be automated:** Vocareum API plus AWS APIs
+- **So we built tools:** Each one safe for an agent to drive
+
+<!--
+The core reason is agents. We wanted a coding agent to build a course, run it, test it, evaluate whether a lab came up, and probe what the account permits.
+
+Doing that by hand is slow, and it's easy to get wrong. Each course and each cohort means many steps across the Vocareum web UI, its API, and the cloud console.
+
+Permissions are the hardest part. What a lab account can do has to be measured, not assumed: wide enough for the labs, and no wider.
+
+Every step can be automated. Vocareum's API covers publishing, sessions, and rosters. AWS covers everything inside the account.
+
+So we built tools that an agent can drive safely. The rest of Part 2 shows them.
+-->
+
+---
+
+<!-- _class: dense -->
+
 ## The Two-Repo Model: Workshop Material vs. Shared Utils
 
 | | **Workshop repository** | **Vocareum Utils** |
@@ -472,44 +496,17 @@ To release: commit the content, run bump_pin.py to move the pin, then publish fr
 
 ---
 
-## Why Cloud Labs Are Hard to Troubleshoot
+## Cloud Lab Challenges
 
-- **A failed lab hides its cause:** The student sees only "did not start"
-- **Two kinds of deny look the same:** Both arrive as `AccessDenied`
-- **The account keeps moving:** Vocareum rotates a pool of accounts
-
-<!--
-When the setup template fails, the student sees only that the lab didn't start. The reason sits in a CloudFormation event the student can't read.
-
-An organization policy deny and a missing grant both arrive as AccessDenied. Only one of them can be fixed in the course.
-
-Vocareum rotates a pool of accounts. A check against the old account reports on the wrong lab.
-
-The next slide adds a fourth problem: two principals. A result for one role says nothing about the other.
--->
-
----
-
-<!-- _class: dense -->
-
-## Two Principals in Every Student Account
-
-![w:1100](images/two-principals.svg)
-
-- **A result for one is not a result for the other:** Measure each role on its own
+- **Permissions:** The exact permissions a lab needs are hard to work out, and student accounts are locked down
+- **Failed labs:** A failed lab is hard to troubleshoot inside a student environment
 
 <!--
-The dashed box is one student's AWS account. Every student gets their own, and both roles live inside it.
+A lab needs exactly the right grants. Student accounts are locked down, so working out which permissions a lab needs takes careful testing.
 
-On the left is the deployer role. Vocareum assumes it at Start Lab to run lab.template through CloudFormation. It needs rights to create every resource and every grant in the template.
+When a lab fails, the cause sits inside the student's environment. That makes it hard to troubleshoot.
 
-The arrow is how the two roles connect. The template attaches RolePolicy grants to the student session role. For the hotel workshop, that is three grants: Bedrock, AgentCore, and the workshop's own IAM roles.
-
-On the right is the student session role. The notebook code runs as this role. It holds only what the template granted it.
-
-So an action that works for the deployer can still fail in a notebook. The tools measure each role on its own, and the permission tracker keeps them in separate tables.
-
-The red bar along the bottom is the organization's service control policies. They apply to both roles. An SCP deny can't be lifted by any grant in the template, or by anything else inside the account.
+The two principals from earlier add one more challenge. A result for one role says nothing about the other.
 -->
 
 ---
