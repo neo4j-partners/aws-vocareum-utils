@@ -174,11 +174,9 @@ The course and its Vocareum assets live in the public neo4j-hotel-booking-agent-
 ## Hands-On Workshop with Neo4j and Databricks
 
 - **Students build:** An agent for a commercial aviation fleet
-- **The fleet:** 36 synthetic jets, five models, four airlines
 - **Neo4j Aura:** Aircraft, flights, maintenance, five manuals
 - **Databricks Lakehouse:** 90 days of engine sensor readings
 - **LangGraph supervisor:** Routes each question to the right database
-- **Example:** "Which aircraft has the highest average vibration, and has it had any maintenance events?"
 - **Provisioning:** Four Vocareum hooks, no CloudFormation
 - **Repository:** [databricks-neo4j-workshop](https://github.com/neo4j-partners/databricks-neo4j-workshop)
 
@@ -193,7 +191,7 @@ Databricks holds the telemetry. That's 155,520 engine sensor readings over 90 da
 
 A LangGraph supervisor routes each question to whichever database can answer it.
 
-The data is correlated on purpose. Engines that degrade faster cross warning thresholds sooner, and those crossings trigger the maintenance events in the graph. So the example question needs both databases. Databricks finds the aircraft with the highest vibration. Neo4j finds its maintenance history.
+The data is correlated on purpose. Engines that degrade faster cross warning thresholds sooner, and those crossings trigger the maintenance events in the graph. So a question such as "Which aircraft has the highest average vibration, and has it had any maintenance events?" needs both databases. Databricks finds the aircraft with the highest vibration. Neo4j finds its maintenance history.
 
 There are six labs: Neo4j Aura setup, Databricks ETL to Neo4j, semantic search with GraphRAG, a Genie agent, a LangGraph agent, and agent memory in the graph. An optional appendix covers graph analytics.
 
@@ -204,106 +202,6 @@ This course uses four Vocareum lifecycle hooks instead of a CloudFormation templ
 - lab_end.sh reclaims anything billable when the session ends.
 
 TODO: Add the target date.
--->
-
----
-
-<!-- _class: dense -->
-
-## Locked Down, but Still a Full Experience
-
-| **Risk** | **Lock it down** | **What students still get** |
-| --- | --- | --- |
-| Big compute | Small VMs and instance types | A real IDE or notebook lab |
-| Runaway model calls | A spend budget, approved models only | Real Bedrock models and embeddings |
-| Service sprawl | Only the services the lab uses | Real AgentCore, not a mock |
-| Privilege escalation | New roles only under `workshop-*` | Students still create their own roles |
-| Forgotten resources | Session limit, then the account is reclaimed | A six-hour session, a $20 budget |
-
-- **Too tight breaks a lab. Too loose costs money.**
-
-<!--
-This is the tension in every cloud workshop. A real cloud account is what makes the lab worth taking. It's also what makes it risky.
-
-Each row is one risk and one lever. Keep compute small. Cap model spend with a per-student budget, and allow only the models the lab uses. Allow only the services the lab touches. Scope IAM so students can create roles, but only under a prefix the template controls. End every session on a timer, and reclaim the account.
-
-The hard part is the balance. Lock down too far and a student hits AccessDenied halfway through Module 4, with no way to fix it. Leave it too open and one student's forgotten cluster runs all weekend.
-
-There are two layers. The organization's policies sit over every account, and nothing inside the account can lift them. The course template adds grants on top. Part 2 shows how we measure that both layers leave exactly what the lab needs.
--->
-
----
-
-## Why Cloud Notebooks Need Credentials
-
-- **Notebook code calls the cloud:** Bedrock, AgentCore, Databricks SQL
-- **No long-lived keys:** They leak, and they outlive the class
-- **AWS:** Temporary keys, scoped to one session
-- **Databricks:** A token made inside a live session
-- **Neo4j Aura:** Connection details from Neo4j, in `CONFIG.txt`
-- **Keys arrive before grants:** Wait for setup to finish
-
-<!--
-A hosted notebook is easy to stand up. A hosted notebook that can call your cloud is not, because it needs credentials.
-
-Handing out long-lived keys is the shortcut, and it's the wrong one. Keys get pasted into chat, committed to Git, and they keep working after the class ends.
-
-On AWS, each Vocareum session carries temporary keys for that student's account. They expire with the session.
-
-On Databricks, the session hands out no credentials at all. A token has to be created inside the live session.
-
-Neo4j sits outside the lab in Aura. Neo4j provides each student an instance, and the student puts its connection details in CONFIG.txt.
-
-One trap: the AWS keys show up before the setup template has applied its grants. A notebook that runs too early gets AccessDenied for a grant that's about to exist.
--->
-
----
-
-## What Vocareum Provides
-
-- **Lab environments:** JupyterLab and VS Code in the browser
-- **Budgets and session limits:** Set per student
-- **Rosters and enrollment:** See who has started a lab
-- **A REST API:** Publishing, sessions, rosters, spend
-- **More:** LMS integration, grading, analytics
-
-<!--
-Vocareum presents this slide. Confirm each item with them.
-
-Labs run in the browser, in JupyterLab or VS Code, so students install nothing.
-
-Budgets and session limits are set per student. That's what keeps a forgotten cluster from running all weekend.
-
-Rosters show who is enrolled and who has started a lab.
-
-The REST API covers publishing, sessions, rosters, and spend. That API is what makes Part 2 of this talk possible.
-
-Add LMS integration, grading, analytics, and any other features Vocareum wants to show.
--->
-
----
-
-<!-- _class: dense -->
-
-## Why Neo4j Didn't Build It All Itself
-
-| **What we'd have to build** | **What Vocareum already runs** |
-| --- | --- |
-| An account per student, reused safely | A rotating pool of cloud accounts |
-| Guardrails over every account | Organization policies on every account |
-| Spend tracking and hard stops | Per-student budgets and session limits |
-| Teardown when the session ends | Lab end and account reclaim |
-| Browser IDEs wired to credentials | JupyterLab and VS Code labs |
-| Four clouds, one student experience | AWS, Databricks, Google Cloud, Azure |
-
-- **Neo4j's part:** Course content, setup code, and the checks
-
-<!--
-We could have built this. AWS has account vending tools, and every cloud has budgets and policies. But building it is the easy part. Owning it, for every cohort, on four clouds, is the hard part.
-
-Vocareum already runs the account pool, the guardrails, the budgets, the teardown, and the browser labs. It runs them the same way on every cloud we teach.
-
-That leaves Neo4j with the part only we can do: the course content, the setup code that runs at Start Lab, and the checks that prove a lab works. Part 2 is about those checks.
 -->
 
 ---
@@ -367,6 +265,114 @@ Workspace: AWS accounts come from a pool that Vocareum rotates. Databricks gets 
 
 ---
 
+<!-- _class: dense -->
+
+## Locked Down, but Still a Full Experience
+
+| **Risk** | **Lock it down** | **What students still get** |
+| --- | --- | --- |
+| Big compute | Small VMs and instance types | A real IDE or notebook lab |
+| Runaway model calls | A spend budget, approved models only | Real Bedrock models and embeddings |
+| Service sprawl | Only the services the lab uses | Real AgentCore, not a mock |
+| Privilege escalation | New roles only under `workshop-*` | Students still create their own roles |
+| Forgotten resources | Session limit, then the account is reclaimed | A six-hour session, a $20 budget |
+
+- **Too tight breaks a lab. Too loose costs money.**
+
+<!--
+This is the tension in every cloud workshop. A real cloud account is what makes the lab worth taking. It's also what makes it risky.
+
+Each row is one risk and one lever. Keep compute small. Cap model spend with a per-student budget, and allow only the models the lab uses. Allow only the services the lab touches. Scope IAM so students can create roles, but only under a prefix the template controls. End every session on a timer, and reclaim the account.
+
+The hard part is the balance. Lock down too far and a student hits AccessDenied halfway through Module 4, with no way to fix it. Leave it too open and one student's forgotten cluster runs all weekend.
+
+There are two layers. The organization's policies sit over every account, and nothing inside the account can lift them. The course template adds grants on top. Part 2 shows how we measure that both layers leave exactly what the lab needs.
+-->
+
+---
+
+## Why Cloud Notebooks Need Credentials
+
+- **Notebook code calls the cloud:** Bedrock, AgentCore, Databricks SQL
+- **No long-lived keys:** They leak, and they outlive the class
+- **AWS:** Temporary keys, scoped to one session
+- **Databricks:** A token made inside a live session
+- **Neo4j Aura:** Connection details from Neo4j, in `CONFIG.txt`
+- **Keys arrive before grants:** Wait for setup to finish
+
+<!--
+A hosted notebook is easy to stand up. A hosted notebook that can call your cloud is not, because it needs credentials.
+
+Handing out long-lived keys is the shortcut, and it's the wrong one. Keys get pasted into chat, committed to Git, and they keep working after the class ends.
+
+On AWS, each Vocareum session carries temporary keys for that student's account. They expire with the session.
+
+On Databricks, the session hands out no credentials at all. A token has to be created inside the live session.
+
+Neo4j sits outside the lab in Aura. Neo4j provides each student an instance, and the student puts its connection details in CONFIG.txt.
+
+One trap: the AWS keys show up before the setup template has applied its grants. A notebook that runs too early gets AccessDenied for a grant that's about to exist.
+-->
+
+---
+
+<!-- _class: dense -->
+
+## What Vocareum Provides
+
+- **An isolated environment per student:** One cloud account each
+- **Setup at Start Lab:** A script such as a CloudFormation template runs first
+- **Lab environments:** JupyterLab and VS Code in the browser
+- **Budgets and session limits:** Set per student
+- **Rosters and enrollment:** See who has started a lab
+- **A REST API:** Publishing, sessions, rosters, spend
+- **More:** LMS integration, grading, analytics
+
+<!--
+Vocareum presents this slide. Confirm each item with them.
+
+Each student gets their own cloud account. One student's work cannot touch another student's.
+
+Vocareum runs a setup script, such as a CloudFormation template, when the student clicks Start Lab. The student starts in a lab that is already configured.
+
+Labs run in the browser, in JupyterLab or VS Code, so students install nothing.
+
+Budgets and session limits are set per student. That's what keeps a forgotten cluster from running all weekend.
+
+Rosters show who is enrolled and who has started a lab.
+
+The REST API covers publishing, sessions, rosters, and spend. That API is what makes Part 2 of this talk possible.
+
+Add LMS integration, grading, analytics, and any other features Vocareum wants to show.
+-->
+
+---
+
+<!-- _class: dense -->
+
+## Why Neo4j Didn't Build It All Itself
+
+| **What we'd have to build** | **What Vocareum already runs** |
+| --- | --- |
+| An account per student, reused safely | A rotating pool of cloud accounts |
+| Guardrails over every account | Organization policies on every account |
+| Spend tracking and hard stops | Per-student budgets and session limits |
+| Teardown when the session ends | Lab end and account reclaim |
+| Browser IDEs wired to credentials | JupyterLab and VS Code labs |
+| Four clouds, one student experience | AWS, Databricks, Google Cloud, Azure |
+
+- **Neo4j's part:** Course content, setup code, and the checks
+
+<!--
+We could have built this. AWS has account vending tools, and every cloud has budgets and policies. But building it is the easy part. Owning it, for every cohort, on four clouds, is the hard part.
+
+Vocareum already runs the account pool, the guardrails, the budgets, the teardown, and the browser labs. It runs them the same way on every cloud we teach.
+
+That leaves Neo4j with the part only we can do: the course content, the setup code that runs at Start Lab, and the checks that prove a lab works. Part 2 is about those checks.
+-->
+
+---
+
 <!-- _class: lead -->
 
 # Part 2: The Tools We Built
@@ -376,7 +382,29 @@ Workspace: AWS accounts come from a pool that Vocareum rotates. Databricks gets 
 <!--
 That's how the courses are hosted. Now for running them.
 
-Every step in Part 1 can be scripted against the Vocareum API and the cloud's own APIs. We built tools for those steps and designed them so a coding agent can drive them. Start with what a course is made of, then the tools. The examples use the AWS course. The Databricks tools come at the end.
+First, why we built tools at all. Then what a course is made of, then the tools themselves. The examples use the AWS course. The Databricks tools come at the end.
+-->
+
+---
+
+## Why We Need Vocareum Utils
+
+- **The goal:** An agent that builds, runs, tests, evaluates, and probes each course
+- **By hand, it's slow:** Many steps across Vocareum and the cloud
+- **Permissions must be measured:** Wide enough, and no wider
+- **Every step can be automated:** Vocareum API plus AWS APIs
+- **So we built tools:** Each one safe for an agent to drive
+
+<!--
+The core reason is agents. We wanted a coding agent to build a course, run it, test it, evaluate whether a lab came up, and probe what the account permits.
+
+Doing that by hand is slow, and it's easy to get wrong. Each course and each cohort means many steps across the Vocareum web UI, its API, and the cloud console.
+
+Permissions are the hardest part. What a lab account can do has to be measured, not assumed: wide enough for the labs, and no wider.
+
+Every step can be automated. Vocareum's API covers publishing, sessions, and rosters. AWS covers everything inside the account.
+
+So we built tools that an agent can drive safely. The rest of Part 2 shows them, starting with what a course is made of.
 -->
 
 ---
@@ -444,6 +472,24 @@ To release: commit the content, run bump_pin.py to move the pin, then publish fr
 
 ---
 
+## Why Cloud Labs Are Hard to Troubleshoot
+
+- **A failed lab hides its cause:** The student sees only "did not start"
+- **Two kinds of deny look the same:** Both arrive as `AccessDenied`
+- **The account keeps moving:** Vocareum rotates a pool of accounts
+
+<!--
+When the setup template fails, the student sees only that the lab didn't start. The reason sits in a CloudFormation event the student can't read.
+
+An organization policy deny and a missing grant both arrive as AccessDenied. Only one of them can be fixed in the course.
+
+Vocareum rotates a pool of accounts. A check against the old account reports on the wrong lab.
+
+The next slide adds a fourth problem: two principals. A result for one role says nothing about the other.
+-->
+
+---
+
 <!-- _class: dense -->
 
 ## Two Principals in Every Student Account
@@ -464,28 +510,6 @@ On the right is the student session role. The notebook code runs as this role. I
 So an action that works for the deployer can still fail in a notebook. The tools measure each role on its own, and the permission tracker keeps them in separate tables.
 
 The red bar along the bottom is the organization's service control policies. They apply to both roles. An SCP deny can't be lifted by any grant in the template, or by anything else inside the account.
--->
-
----
-
-## Why We Need Vocareum Utils
-
-- **One AWS account per student:** CloudFormation runs at Start Lab
-- **A real account means real power:** Bedrock, AgentCore, and more
-- **Permissions must be measured:** Wide enough, and no wider
-- **Every step can be automated:** Vocareum API plus AWS APIs
-- **Agents can do the work:** Build, check, and run end to end
-
-<!--
-Vocareum gives every student their own AWS account. At Start Lab, it runs a CloudFormation template in that account.
-
-Students build with real AWS services, such as Bedrock and AgentCore. That's real power, so the course author has to decide exactly what each account can do.
-
-That scope has to be measured, not assumed, and measured for both roles. Only a measurement shows it's right: wide enough for the labs, and no wider.
-
-Vocareum's API covers publishing, sessions, and rosters. AWS covers everything inside the account. Together they mean every step can be automated.
-
-With the right tools, a coding agent can build, check, and run a course end to end.
 -->
 
 ---
@@ -517,7 +541,7 @@ We also keep our own notes, in docs/vocareum-api.md, on every request shape that
 - **The agent is the operator:** A person sets goals, approves risky steps
 - **`CLAUDE.md` is the manual:** Commands, rules, and why
 - **Docstrings carry the reasoning:** The failure behind each guard
-- **Every answer is checkable:** Exit codes, and often `--json`
+- **Every answer is checkable:** Exit codes, and `--json` on some tools
 
 <!--
 The main user of these tools is a coding agent, not a person. A person sets the goal and approves the risky steps.
@@ -537,7 +561,7 @@ Every answer can be checked. Tools exit with codes an agent can branch on, and s
 - **Three guards first:** Credentials, account, region
 - **Exit codes as answers:** `0` ready, `3` not ready, `2` refused
 - **Proof, not trust:** Read back every upload, poll every delete
-- **Offline tests:** 800+, with no AWS or Vocareum call
+- **Offline tests:** 650+, with no AWS or Vocareum call
 
 <!--
 Preview by default. Commands that change state do nothing without a flag such as --publish, --delete, or --yes. An agent can always look before it acts.
@@ -548,7 +572,7 @@ Exit codes are the answer. For example, vocareum-expect exits 0 when the lab is 
 
 Proof, not trust. Every upload is downloaded back and compared by hash. A delete that returned isn't a delete that finished, so deletes are polled until the resource is gone.
 
-More than 800 offline tests run with no AWS or Vocareum call. ./scripts/validate_all.py is the full gate before a release.
+More than 650 offline tests run with no AWS or Vocareum call. ./scripts/validate_all.py is the full gate before a release.
 -->
 
 ---
@@ -584,24 +608,6 @@ The one step with no tool is the first: creating the course, assignment, and par
 
 ---
 
-## Why Cloud Labs Are Hard to Troubleshoot
-
-- **A failed lab hides its cause:** The student sees only "did not start"
-- **Two kinds of deny look the same:** Both arrive as `AccessDenied`
-- **The account keeps moving:** Vocareum rotates a pool of accounts
-
-<!--
-When the setup template fails, the student sees only that the lab didn't start. The reason sits in a CloudFormation event the student can't read.
-
-An organization policy deny and a missing grant both arrive as AccessDenied. Only one of them can be fixed in the course.
-
-Vocareum rotates a pool of accounts. A check against the old account reports on the wrong lab.
-
-The two principals from earlier add a fourth problem. A result for one role says nothing about the other.
--->
-
----
-
 <!-- _class: dense -->
 
 ## Tools for Troubleshooting and Probing
@@ -609,7 +615,7 @@ The two principals from earlier add a fourth problem. A result for one role says
 | **Capability** | **Command** | **What it does** |
 | --- | --- | --- |
 | Diagnose | `vocareum-diagnose` | Recovers why a stack failed, no console needed |
-| Probe | `vocareum-probe` | Measures one IAM action. Tells the two denies apart. |
+| Probe | `vocareum-probe` | Measures IAM actions one at a time. Tells the two denies apart. |
 | Gate | `vocareum-expect` | Checks that a lab holds what it should |
 | Refresh | `vocareum-refresh` | Repairs account and stack pins after a rotation |
 | Sweep | `vocareum-sweep` | Finds and deletes this workshop's leftovers |
@@ -618,11 +624,11 @@ The two principals from earlier add a fourth problem. A result for one role says
 - **One record of results:** `docs/permissions.md`
 
 <!--
-Each tool answers one of the problems from the last slide.
+Each tool answers one of the troubleshooting problems from earlier.
 
 vocareum-diagnose recovers the CloudFormation failure reason without console access.
 
-vocareum-probe names an IAM action, such as bedrock:ListFoundationModels, and returns a verdict. An organization-level deny can't be lifted inside the account. An ordinary IAM shortfall can be fixed in lab.template. AWS reports both as AccessDenied, so the tool reads the message body to tell them apart.
+vocareum-probe names an IAM action, such as bedrock:ListFoundationModels, and returns a verdict. It reads the message body to tell an organization deny from a missing grant.
 
 vocareum-expect checks that a lab holds what expected.json says it should.
 
@@ -661,6 +667,8 @@ vocareum-restart-student ends one student's session and starts a new one. The st
 vocareum-report-spend reads the roster and reports spend for every student. The API has no single call for a cohort total.
 
 vocareum-scan-pool checks Bedrock access across the pool of accounts. Some pool accounts refuse model calls, and no read-only call predicts which ones.
+
+When the session ends, all of it has to disappear. vocareum-end-all ends every session, and vocareum-sweep finds and deletes anything left behind.
 -->
 
 ---
@@ -705,10 +713,10 @@ Cloudflare blocked Python's default User-Agent with a 403, which looked like a b
 | Clean up | `vocareum-sweep --delete --course NAME` | `dbx-vocareum-orphans --delete` |
 | Pre-warm compute | None needed | `dbx-vocareum-pool --create --min-idle 5` |
 
-Every command runs with `uv run`. [dbx-vocareum on GitHub](https://github.com/neo4j-partners/dbx-vocareum)
+Every command runs with `uv run`.
 
 <!--
-dbx-vocareum is the Databricks counterpart to Vocareum Utils. Its tools are ported from the AWS tools and follow the same rules.
+dbx-vocareum is the Databricks counterpart to Vocareum Utils. Its tools are ported from the AWS tools and follow the same rules. It's on GitHub at github.com/neo4j-partners/dbx-vocareum.
 
 Most steps map one to one: scaffold, publish, prove the lab came up, explain a failure, measure permissions, end sessions, and clean up.
 
@@ -717,7 +725,7 @@ The last row has no AWS equivalent. Databricks clusters are slow to start, so db
 
 ---
 
-## Demo: An Agent Runs the Lifecycle
+## Example - An Agent Runs the Lifecycle
 
 1. **Offline self-test:** `uv run vocareum-probe --self-test`
 2. **Release preview:** `uv run vocareum-release --course graphrag`
@@ -741,24 +749,22 @@ Starting a lab spends one launch from the budget. Use the session opened before 
 
 ## How to Adopt the Pattern
 
-- **Start with the guards:** Confirm account and region before reporting
-- **Preview first:** Let the agent look before it acts
-- **Answer with exit codes:** Branch on results, not prose
-- **Write down why:** Reasoning in the code, so the agent keeps it
-- **Keep one source of truth:** One file per measured result
+1. **Copy our AWS workshop:** Its layout, its setup, and the tools
+2. **Find the guardrails:** What the student account allows and blocks
+3. **Preview first:** See what a change will do before it runs
+4. **Keep an audit log:** The agent records every finding and permission
+5. **Use the log as your security audit:** What a student can do, and how you know
 
 <!--
-You can apply this to your own tools, on any platform.
+You don't have to start from scratch. The hotel booking workshop and Vocareum Utils are both public. Copy the course layout, the setup template, and the tools, then swap in your own content.
 
-Start with the guards. Before a tool reports anything, confirm it's looking at the right account and region.
+Next, find the guardrails. Before you write a lab, measure what the student account allows and what it blocks. Some blocks come from the organization, and you can't change them. Others come from your own template.
 
-Preview first. Make every change opt-in, so an agent can look before it acts.
+Preview first. Every tool shows what it would do before it does it. An agent, or a person, can check a change before it touches a live course.
 
-Answer with exit codes. An agent can branch on a number. It has to guess at prose.
+Keep an audit log. Have the agent write down every finding and every permission it measures, with the date and the result. In our repository, that's docs/permissions.md.
 
-Write down why. Put the reasoning next to the code, so an agent doesn't remove a guard it doesn't understand.
-
-Keep one source of truth. Each measured result lives in one place, so nothing contradicts it.
+That log becomes your security audit. It shows exactly what a student can do in the lab, and how you know.
 -->
 
 ---
@@ -950,7 +956,7 @@ The next slide maps every step after the first to one command.
 Creating the course, assignment, and part is still done in the Vocareum web UI.
 
 <!--
-Every step after creating the course in the web UI is one command.
+This is the combined version of the two main-deck tables, Tools That Build a Course and Tools That Run a Cohort, with the full commands. Every step after creating the course in the web UI is one command.
 
 vocareum-course-setup connects the tools to an existing Vocareum course, and --write-local scaffolds the course files.
 
@@ -983,7 +989,7 @@ vocareum-sweep --delete removes the workshop's leftovers. --restore rolls back t
 | `GET .../resources/{user}` | Session state, spend, AWS keys | `vocareum-refresh`, `vocareum-report-spend` |
 | `DELETE .../resources/{user}` | End a session | `vocareum-end-lab`, `vocareum-end-all` |
 | `GET /courses/{c}/users` | The roster, one user ID per student | `vocareum-end-all` |
-| `GET /transaction/{id}` | Poll a write that answered `202` | Every write |
+| `GET /transaction/{id}` | Poll a write that answered `202` | Most writes |
 
 - **The wrapper adds:** Polling, one URL map, redaction, read-back
 
