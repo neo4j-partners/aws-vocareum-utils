@@ -55,6 +55,7 @@ aws-exports.js
 signup/vocareum-enrollment-8_27/
 signup/*.csv
 !signup/enroll-students.csv
+data/
 
 # CloudFormation and IaC working files
 packaged.yaml
