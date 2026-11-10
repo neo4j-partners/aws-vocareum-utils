@@ -187,245 +187,6 @@ DEPLOY_CONTEXT_MARKER = 'DEPLOY_DIR = MODULE_DIR / "runtime_app"'
 # how it discovers git metadata as long as this comment stays put; matching the
 # implementation itself broke the day that implementation grew a helper function.
 GIT_IDENTITY_MARKER = "# Vocareum git identity"
-NOTEBOOK_BOOTSTRAP_MARKER = "# Vocareum dependency bootstrap"
-NOTEBOOK_BOOTSTRAP_HEADING_SOURCE = """## Prepare workshop dependencies
-
-Run this cell first. It installs the pinned workshop packages once per lab
-session when needed, then makes the shared dependency directory available to
-this notebook."""
-NOTEBOOK_BOOTSTRAP_SOURCE = f"""{NOTEBOOK_BOOTSTRAP_MARKER}
-import hashlib
-import os
-import shutil
-import subprocess
-import sys
-import threading
-import time
-from pathlib import Path
-
-# Find requirements.txt from wherever this notebook was opened.
-start = Path.cwd().resolve()
-sources = (
-    start / "notebooks" / "requirements.txt",
-    start / "requirements.txt",
-    start.parent / "requirements.txt",
-)
-requirements = next((path for path in sources if path.is_file()), None)
-if requirements is None:
-    looked = "\\n  ".join(str(path) for path in sources)
-    raise FileNotFoundError(
-        f"No requirements.txt found from {{start}}. Looked at:\\n  {{looked}}\\n"
-        "Open this notebook from the extracted starter-code tree rather than "
-        "from a copy somewhere else in the workspace."
-    )
-
-# Pick an install directory every kernel in this session can read.
-# Local disk first, because /voc/work is a slow network filesystem.
-# WORKSHOP_DEPS_DIR overrides the search.
-override = os.environ.get("WORKSHOP_DEPS_DIR")
-if override:
-    roots = (Path(override).expanduser().resolve(),)
-else:
-    roots = tuple(
-        root / f"workshop-deps-{{os.getuid()}}"
-        for root in (Path("/tmp"), Path.home(), requirements.parent)
-    )
-target = None
-refusals = []
-for candidate in roots:
-    try:
-        candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
-        probe = candidate / ".write-test"
-        probe.write_text("")
-        probe.unlink()
-    except OSError as error:
-        refusals.append(f"{{candidate}}: {{error}}")
-        continue
-    target = candidate
-    break
-if target is None:
-    refused = "\\n  ".join(refusals)
-    if override:
-        remedy = (
-            f"WORKSHOP_DEPS_DIR names {{override}}, which this account cannot "
-            "write. Unset it to fall back to the normal search."
-        )
-    else:
-        remedy = (
-            "Set WORKSHOP_DEPS_DIR to a directory you can write, then re-run "
-            "this cell."
-        )
-    raise RuntimeError(
-        f"No writable directory for the workshop dependencies.\\n  {{refused}}\\n"
-        f"{{remedy}}"
-    )
-
-# Report the interpreter, the target filesystem, and free space, and warn
-# when either would make the install slow or fail.
-fstype = "unknown"
-try:
-    longest = ""
-    for line in Path("/proc/mounts").read_text().splitlines():
-        fields = line.split()
-        if len(fields) < 3:
-            continue
-        point = fields[1].rstrip("/") + "/"
-        if f"{{target}}/".startswith(point) and len(point) > len(longest):
-            longest, fstype = point, fields[2]
-except OSError:
-    pass
-free_gb = shutil.disk_usage(target).free / 1e9
-print(f"Python       {{sys.version.split()[0]}} at {{sys.executable}}")
-print(f"Target       {{target}} ({{fstype}}, {{free_gb:.1f}} GB free)")
-print(f"Requirements {{requirements}}")
-if fstype.startswith(("nfs", "cifs", "fuse")):
-    print(
-        f"WARNING: {{target}} is on a network filesystem ({{fstype}}). Writing "
-        "roughly 15,000 small files there has taken over ten minutes. Set "
-        "WORKSHOP_DEPS_DIR to a local directory to avoid it."
-    )
-if free_gb < 1.0:
-    print(
-        f"WARNING: only {{free_gb:.1f}} GB free, and the dependency tree needs "
-        "about 0.5 GB."
-    )
-
-INSTALL_TIMEOUT_SECONDS = 900
-
-# Install only when requirements.txt has changed since the last install.
-stamp = target / "requirements.sha256"
-digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
-if not stamp.is_file() or stamp.read_text().strip() != digest:
-    print(f"Installing workshop dependencies into {{target}}")
-    began = time.monotonic()
-    install = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--progress-bar",
-            "off",
-            "--timeout",
-            "20",
-            "--retries",
-            "2",
-            "--upgrade",
-            "--target",
-            str(target),
-            "-r",
-            str(requirements),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    # Print pip's output as it arrives, and stop the install if it overruns
-    # the timeout.
-    watchdog = threading.Timer(INSTALL_TIMEOUT_SECONDS, install.kill)
-    watchdog.start()
-    try:
-        for line in install.stdout:
-            print(line, end="")
-        code = install.wait()
-    finally:
-        watchdog.cancel()
-    elapsed = time.monotonic() - began
-    if code != 0:
-        if elapsed >= INSTALL_TIMEOUT_SECONDS:
-            raise TimeoutError(
-                f"Installing into {{target}} passed {{INSTALL_TIMEOUT_SECONDS}} "
-                f"seconds and was stopped. That target is on {{fstype}}; if that "
-                "is a network filesystem, set WORKSHOP_DEPS_DIR to a local "
-                "directory such as /tmp/workshop-deps and re-run this cell."
-            )
-        raise RuntimeError(
-            f"pip install failed with exit status {{code}}. The pip output above "
-            f"ends with the reason. A partial install is safe to discard: delete "
-            f"{{target}} and re-run this cell."
-        )
-    stamp.write_text(digest)
-    print(f"Installed in {{elapsed:.0f}} seconds")
-if str(target) not in sys.path:
-    sys.path.insert(0, str(target))
-print(f"Workshop dependencies ready in {{target}}")"""
-
-
-def adapt_notebook_dependencies(payload: bytes) -> bytes:
-    """Install workshop requirements where every kernel in a session can read them.
-
-    The hosted instructions create a virtual environment, but Vocareum opens
-    notebooks with its own kernels, and it hands out more than one inside a
-    single session: measured 2026-08-25, ``1.0_verify_environment.ipynb`` ran
-    under ``/usr/local/bin/python3.10`` while ``1.1_build_graph.ipynb`` ran
-    under ``/usr/local/venvs/jupyter/bin/python3``. An install aimed at
-    ``sys.executable``'s own site-packages therefore has two ways to fail. The
-    shared Jupyter virtual environment is not writable by the student account,
-    so the install stops on ``Errno 13``; and when it does succeed, it lands
-    where the next notebook's kernel cannot see it.
-
-    Installing into one target directory removes both. The student owns that
-    directory under either kernel, and every notebook prepends the same path,
-    so one install serves the whole session. Where the directory sits decides
-    how long it takes: ``/voc/work`` is EFS over NFS, and measured 2026-08-25
-    the 448 MB tree left pip in uninterruptible sleep past ten minutes there,
-    so the container's local disk is tried first and ``WORKSHOP_DEPS_DIR``
-    overrides the search for anyone who needs it elsewhere. An override is
-    used verbatim rather than falling back, because a silent fall back hides
-    the thing it was set to investigate.
-
-    The cell prints the interpreter, the target's filesystem type, and its
-    free space before it starts, and every exit names the next action. Those
-    exist because the first failures here were unreadable: the install that
-    stopped on ``Errno 13`` said nothing about which of the two kernels it had
-    run under, and the one that took ten minutes on NFS was indistinguishable
-    from a hang. The requirements lookup supports the same three working
-    directories as the workshop notebooks themselves.
-    """
-    try:
-        notebook = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise StarterCodeError(
-            f"Could not adapt notebook dependencies: {error}"
-        ) from error
-
-    cells = notebook.get("cells")
-    if not isinstance(cells, list):
-        raise StarterCodeError("The pinned notebook has no cell list.")
-
-    occurrences = 0
-    for cell in cells:
-        if not isinstance(cell, dict):
-            continue
-        original = cell.get("source")
-        source = "".join(original) if isinstance(original, list) else original
-        if isinstance(source, str):
-            occurrences += source.count(NOTEBOOK_BOOTSTRAP_MARKER)
-    if occurrences > 1:
-        raise StarterCodeError(
-            "The pinned notebook has more than one Vocareum dependency bootstrap."
-        )
-    if occurrences == 1:
-        return payload
-
-    source = NOTEBOOK_BOOTSTRAP_SOURCE.splitlines(True)
-    bootstrap = {
-        "cell_type": "code",
-        "execution_count": None,
-        "metadata": {},
-        "outputs": [],
-        "source": source,
-    }
-    heading = {
-        "cell_type": "markdown",
-        "metadata": {},
-        "source": NOTEBOOK_BOOTSTRAP_HEADING_SOURCE.splitlines(True),
-    }
-    position = 1 if cells and cells[0].get("cell_type") == "markdown" else 0
-    cells[position:position] = [heading, bootstrap]
-    return (json.dumps(notebook, indent=1, ensure_ascii=False) + "\n").encode()
 
 
 def adapt_deploy_notebook(payload: bytes, commit: str) -> bytes:
@@ -554,16 +315,24 @@ COURSE_ADAPTERS: dict[str, CourseAdapters] = {
 def adapt_for_vocareum(
     course: str, path: str, payload: bytes, commit: str
 ) -> SourceFile:
-    """Return one deterministic course file using extractor-safe names."""
+    """Return one deterministic course file using extractor-safe names.
+
+    Notebooks get no dependency install cell. One was injected into every
+    notebook because a 2026-08-25 session ran two notebooks under two kernels,
+    so it installed into a shared ``/tmp`` target. Course 240272 preinstalls the
+    requirements into its saved image instead, and measured 2026-11-09 on image
+    3687 there is one ``python3`` kernelspec, ``/bin/python`` resolves to
+    ``/usr/bin/python3.10``, ``/usr/local/venvs`` does not exist, and a second
+    notebook also starts on ``/bin/python``. The cell's ``--target`` install
+    ignored the image and cost every session about 95 seconds. A missing
+    package now surfaces in notebook 1.0's package check. The removed cell is
+    in git history if an image ever hands out more than one kernel again.
+    """
     adapters = COURSE_ADAPTERS.get(course)
     if adapters is None:
         return SourceFile(path, payload)
-    adapted_payload = payload
-    if path.startswith("notebooks/") and path.endswith(".ipynb"):
-        adapted_payload = adapt_notebook_dependencies(adapted_payload)
     adapter = adapters.content.get(path)
-    if adapter is not None:
-        adapted_payload = adapter(adapted_payload, commit)
+    adapted_payload = payload if adapter is None else adapter(payload, commit)
     return SourceFile(adapters.renames.get(path, path), adapted_payload)
 
 

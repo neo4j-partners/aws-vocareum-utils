@@ -195,17 +195,12 @@ def test_vocareum_requirements_add_each_missing_compatibility_dependency() -> No
     assert adapted.count("requests>=2.34.2") == 1
 
 
-def test_graphrag_notebooks_install_requirements_into_a_writable_target() -> None:
+def test_graphrag_notebooks_ship_without_a_dependency_bootstrap() -> None:
+    """The saved image holds the requirements, so no install cell is added."""
     payload = json.dumps(
         {
             "cells": [
-                {
-                    "cell_type": "markdown",
-                    "source": [
-                        "# Module 1\n",
-                        "## Add five hotels to the preloaded graph\n",
-                    ],
-                },
+                {"cell_type": "markdown", "source": ["# Module 1\n"]},
                 {"cell_type": "code", "source": ["import graph_builder\n"]},
             ]
         }
@@ -214,48 +209,8 @@ def test_graphrag_notebooks_install_requirements_into_a_writable_target() -> Non
     adapted = startercode.adapt_for_vocareum(
         "graphrag", "notebooks/01/module.ipynb", payload, "0" * 40
     )
-    cells = json.loads(adapted.payload)["cells"]
-    heading = "".join(cells[1]["source"])
-    bootstrap = "".join(cells[2]["source"])
 
-    assert cells[0]["cell_type"] == "markdown"
-    assert cells[1]["cell_type"] == "markdown"
-    assert heading.startswith("## Prepare workshop dependencies\n")
-    assert cells[2]["cell_type"] == "code"
-    assert startercode.NOTEBOOK_BOOTSTRAP_MARKER in bootstrap
-    assert "sys.executable" in bootstrap
-    assert '"pip"' in bootstrap
-    assert '"requirements.txt"' in bootstrap
-    # Vocareum's kernels are not writable by the student and more than one is
-    # handed out per session, so the install must not aim at sys.executable's
-    # own site-packages and the path must be readable from the next notebook.
-    assert '"--target"' in bootstrap
-    assert "sys.path.insert(0, str(target))" in bootstrap
-    # /voc/work is EFS over NFS and copying the tree there takes over ten
-    # minutes, so the container's local disk is tried first and the uid keeps
-    # the directory this student's own.
-    assert 'for root in (Path("/tmp"), Path.home(), requirements.parent)' in bootstrap
-    assert "workshop-deps-{os.getuid()}" in bootstrap
-    # A child process writes past the cell into the gateway log, so the output
-    # is read from a pipe and printed, and a stall fails instead of hanging.
-    assert "subprocess.Popen(" in bootstrap
-    assert "for line in install.stdout:" in bootstrap
-    assert "INSTALL_TIMEOUT_SECONDS" in bootstrap
-    assert '"--quiet"' not in bootstrap
-    # The interpreter, the filesystem under the target, and the free space are
-    # the three facts that explain every failure this cell has produced, and a
-    # network filesystem presents as a hang, so it is named before the wait.
-    assert "/proc/mounts" in bootstrap
-    assert "shutil.disk_usage(target)" in bootstrap
-    assert 'fstype.startswith(("nfs", "cifs", "fuse"))' in bootstrap
-    # Every exit names what to do next rather than only what went wrong.
-    assert "raise FileNotFoundError(" in bootstrap
-    assert "Unset it to fall back to the normal search." in bootstrap
-    # An override is used verbatim; a silent fall back to /tmp would hide the
-    # thing the override was set to investigate.
-    assert 'os.environ.get("WORKSHOP_DEPS_DIR")' in bootstrap
-    assert "roots = (Path(override).expanduser().resolve(),)" in bootstrap
-    assert "import graph_builder" in "".join(cells[3]["source"])
+    assert adapted.payload == payload
 
 
 def test_non_graphrag_notebooks_do_not_get_the_dependency_bootstrap() -> None:
@@ -266,21 +221,6 @@ def test_non_graphrag_notebooks_do_not_get_the_dependency_bootstrap() -> None:
     )
 
     assert adapted.payload == payload
-
-
-def test_notebook_dependency_bootstrap_is_not_duplicated() -> None:
-    payload = json.dumps(
-        {
-            "cells": [
-                {
-                    "cell_type": "code",
-                    "source": startercode.NOTEBOOK_BOOTSTRAP_MARKER,
-                }
-            ]
-        }
-    ).encode()
-
-    assert startercode.adapt_notebook_dependencies(payload) == payload
 
 
 def test_deploy_notebook_recreates_dockerignore_and_uses_pinned_commit() -> None:

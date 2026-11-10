@@ -29,7 +29,7 @@ uv run ruff format --check .
 cfn-lint courses/neo4j-fundamentals/lab.template  # before any upload
 ```
 
-Operational tools. Each Vocareum tool is a `uv run vocareum-*` entry point; `scripts/` holds only the stateful runners and the release and validation scripts:
+Operational tools. Each Vocareum tool is a `uv run vocareum-*` entry point; `scripts/` holds the stateful runners, the release and validation scripts, and one read-only check:
 
 ```bash
 uv run vocareum-upload --dry-run                       # what would be sent
@@ -38,6 +38,7 @@ uv run vocareum-diagnose --no-start                    # why a stack said CREATE
 uv run vocareum-probe --self-test                      # offline classifier check, no AWS
 uv run vocareum-probe --probe bedrock:ListFoundationModels
 ./scripts/run_phase3_agentcore.py --block memory
+./scripts/check_bedrock.py --course graphrag            # repeat notebook 1.0's Bedrock calls, read-only
 uv run vocareum-expect --no-start                      # did the lab come up, as an exit code
 uv run vocareum-refresh --dry-run                      # recover rotated account and stack pins
 uv run vocareum-expect --no-start --course graphrag    # the same, for one course

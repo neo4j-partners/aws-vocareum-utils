@@ -145,7 +145,7 @@ uv run vocareum-release --course NAME --restore RELEASE_ID
 This repository holds the tools that publish, check, and clean up a course. It also holds a small example course, `neo4j-fundamentals`, and the record of what the student account allows.
 
 - **`src/vocareum_tools/`:** This Python package holds every command-line tool, such as upload, release, expect, diagnose, and sweep.
-- **`scripts/`:** This folder holds the scripts that have no `uv run vocareum-*` command. These are the stateful permission tests and the offline gate `validate_all.py`.
+- **`scripts/`:** This folder holds the scripts that have no `uv run vocareum-*` command. These are the stateful permission tests, the offline gate `validate_all.py`, and `check_bedrock.py`, which repeats notebook 1.0's Bedrock calls against an open session.
 - **`courses/`:** This folder holds one env file per course. It also holds the asset folder for `neo4j-fundamentals`.
 - **`docs/`:** These guides cover deploying, diagnosing, permissions, the Vocareum API, and cost.
 - **`tests/`:** Every test runs offline. `tests/management/` covers the tools.
