@@ -36,8 +36,9 @@ PERSONAL_EMAIL_DOMAINS = {
     "yahoo.com",
 }
 VOCAREUM_HEADERS = ("Email", "ID", "Name")
-DEFAULT_SOURCE = Path("signup/8_27 AWS Boston Workshop - Attendence.csv")
-DEFAULT_OUTPUT = Path("signup/vocareum-enrollment-8_27")
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_SOURCE = SCRIPT_DIR / "sample-event-export.csv"
+DEFAULT_OUTPUT = SCRIPT_DIR / "vocareum-enrollment-sample"
 
 
 @dataclass(frozen=True)

@@ -52,9 +52,10 @@ aws-exports.js
 .*.env.*
 
 # Local event-registration exports and generated Vocareum enrollment batches.
-signup/vocareum-enrollment-8_27/
+signup/vocareum-enrollment-*/
 signup/*.csv
 !signup/enroll-students.csv
+!signup/sample-event-export.csv
 data/
 
 # CloudFormation and IaC working files
